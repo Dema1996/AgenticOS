@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgenticOS</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Top bar ─────────────────────────────────────────────────────────── -->
+  <header id="topbar">
+    <div id="topbar-left">
+      <span class="logo">⚡ AgenticOS</span>
+      <span id="agents-status"></span>
+    </div>
+    <div id="topbar-right">
+      <div class="layout-btns">
+        <button id="btn-toggle-sidebar" class="icon-btn layout-btn" title="Linke Seitenleiste ein/ausblenden" onclick="toggleSidebar()">
+          <svg width="15" height="12" viewBox="0 0 15 12" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0.6" y="0.6" width="13.8" height="10.8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/>
+            <rect x="0.6" y="0.6" width="4.4" height="10.8" rx="1.4"/>
+          </svg>
+        </button>
+        <button id="btn-toggle-panel" class="icon-btn layout-btn" title="Rechten Bereich ein/ausblenden" onclick="toggleAgentPanel()">
+          <svg width="15" height="12" viewBox="0 0 15 12" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0.6" y="0.6" width="13.8" height="10.8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/>
+            <rect x="10" y="0.6" width="4.4" height="10.8" rx="1.4"/>
+          </svg>
+        </button>
+      </div>
+      <div class="topbar-sep"></div>
+      <button id="btn-new-task" class="btn-primary" onclick="focusTaskInput()">+ Neuer Task</button>
+      <button id="btn-config" class="icon-btn" title="Einstellungen" onclick="openConfig()">⚙</button>
+    </div>
+  </header>
+
+  <!-- ── 3-column layout ────────────────────────────────────────────────── -->
+  <div id="main-layout">
+
+    <!-- Left sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-label">AGENTEN</div>
+        <div id="agents-list"></div>
+        <button class="add-item-btn" onclick="openConfig('agents')">+ Agent hinzufügen</button>
+      </div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">NAVIGATION</div>
+        <a class="nav-link active" data-view="dashboard" onclick="setView('dashboard')">
+          <span>📊</span> Dashboard
+        </a>
+        <a class="nav-link" data-view="projects" onclick="setView('projects')">
+          <span>📁</span> Projekte
+        </a>
+        <a class="nav-link" data-view="todos" onclick="setView('todos')">
+          <span>✅</span> Todos
+        </a>
+        <a class="nav-link" data-view="log" onclick="setView('log')">
+          <span>📋</span> Agent Log
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main id="content">
+
+      <!-- Dashboard view -->
+      <div id="view-dashboard" class="view">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">AKTIVE PROJEKTE</span>
+            <span id="projects-count" class="badge-count"></span>
+            <span id="vault-source-badge" class="vault-source-badge"></span>
+            <button class="text-btn" onclick="setView('projects')">Alle →</button>
+          </div>
+          <div id="projects-grid" class="projects-grid"></div>
+        </section>
+
+        <div class="section-divider"></div>
+
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">TODOS · KANBAN</span>
+            <span id="todos-count" class="badge-count"></span>
+          </div>
+          <div id="kanban-board" class="kanban-board">
+            <div class="kanban-col">
+              <div class="kanban-col-header col-open">
+                Offen <span class="col-count" id="count-open">0</span>
+              </div>
+              <div class="kanban-cards" id="cards-open"></div>
+            </div>
+            <div class="kanban-col">
+              <div class="kanban-col-header col-inprogress">
+                In Arbeit <span class="col-count" id="count-inprogress">0</span>
+              </div>
+              <div class="kanban-cards" id="cards-inprogress"></div>
+            </div>
+            <div class="kanban-col">
+              <div class="kanban-col-header col-done">
+                Erledigt <span class="col-count" id="count-done">0</span>
+              </div>
+              <div class="kanban-cards" id="cards-done"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Projects view -->
+      <div id="view-projects" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">ALLE PROJEKTE</span>
+          </div>
+          <div id="all-projects-grid" class="projects-grid"></div>
+        </section>
+      </div>
+
+      <!-- Todos view -->
+      <div id="view-todos" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">ALLE TODOS</span>
+            <button class="text-btn" onclick="loadTodos()">↺ Aktualisieren</button>
+          </div>
+          <div id="all-todos-list"></div>
+        </section>
+      </div>
+
+      <!-- Agent Log view -->
+      <div id="view-log" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">AGENT LOG</span>
+            <button class="text-btn" onclick="loadTaskHistory()">↺ Aktualisieren</button>
+          </div>
+          <div id="task-log-list"></div>
+        </section>
+      </div>
+
+    </main>
+
+    <!-- Right: Agent panel -->
+    <aside id="agent-panel" data-mode="chat">
+      <div id="panel-resize-handle"></div>
+      <div id="panel-header">
+        <div class="panel-header-top">
+          <div class="sidebar-label">AGENT</div>
+          <div style="display:flex;align-items:center;gap:2px">
+            <button class="icon-btn" style="padding:3px 5px;line-height:0" title="Neuer Chat" onclick="newChat()">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 1.5l1.5 1.5-6 6H3V7.5L9 1.5z"/>
+                <line x1="1.5" y1="10.5" x2="10.5" y2="10.5"/>
+              </svg>
+            </button>
+            <button id="btn-maximize-chat" class="icon-btn" style="padding:3px 5px;line-height:0" title="Chat maximieren" onclick="toggleMaximizeChat()">
+              <svg id="maximize-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4,1 1,1 1,4"/>
+                <polyline points="8,1 11,1 11,4"/>
+                <polyline points="1,8 1,11 4,11"/>
+                <polyline points="11,8 11,11 8,11"/>
+              </svg>
+            </button>
+            <div id="agent-workdir-badge" class="workdir-badge" title="Arbeitsverzeichnis des Agents"></div>
+          </div>
+        </div>
+        <select id="agent-selector" onchange="onAgentChange(this.value)"></select>
+        <div id="panel-tabs">
+          <button class="panel-tab active" data-tab="chat" onclick="setPanelMode('chat')">Chat</button>
+          <button class="panel-tab" data-tab="terminal" onclick="setPanelMode('terminal')">Terminal</button>
+        </div>
+      </div>
+
+      <div id="recent-tasks"></div>
+
+      <div id="terminal-area">
+        <div id="terminal-output"></div>
+      </div>
+
+      <div id="task-input-area">
+        <textarea id="task-input" placeholder="Nachricht eingeben…&#10;⌘+Enter für neue Zeile" rows="3"></textarea>
+        <div id="task-input-footer">
+          <span id="task-status-indicator"></span>
+          <button id="btn-send" class="btn-send" title="Senden (Enter)">↑</button>
+        </div>
+      </div>
+
+      <div id="term-cmd-area">
+        <span class="term-prompt-symbol">$</span>
+        <input id="term-cmd-input" type="text" placeholder="Befehl eingeben…" autocomplete="off" spellcheck="false">
+        <button id="btn-exec" class="btn-send" title="Ausführen (Enter)">↑</button>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- ── Config modal ─────────────────────────────────────────────────────────── -->
+<div id="config-overlay" class="overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Einstellungen</span>
+      <button class="icon-btn" onclick="closeConfig()">✕</button>
+    </div>
+    <div class="modal-tabs">
+      <button class="modal-tab active" data-tab="general" onclick="showConfigTab('general')">Allgemein</button>
+      <button class="modal-tab" data-tab="agents" onclick="showConfigTab('agents')">Agenten</button>
+    </div>
+    <div class="modal-body">
+      <div id="cfg-tab-general" class="cfg-tab-panel">
+        <div class="config-field">
+          <label>Vault-Pfad (2ndBrain)</label>
+          <input id="cfg-vault-path" type="text" placeholder="/Users/.../2ndBrain" class="config-input">
+          <span class="field-hint">Leer lassen für eigenständigen Datenspeicher</span>
+        </div>
+        <div class="config-field">
+          <label>Port</label>
+          <input id="cfg-port" type="number" value="4000" class="config-input" style="width:120px">
+          <span class="field-hint">Portänderungen erfordern Server-Neustart</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btn-primary" onclick="saveConfig()">Speichern</button>
+          <span id="config-msg"></span>
+        </div>
+      </div>
+      <div id="cfg-tab-agents" class="cfg-tab-panel hidden">
+        <div id="agents-config-list"></div>
+        <button class="btn-secondary" onclick="showAddAgentForm()" style="margin-top:12px">+ Neuer Agent</button>
+        <div id="add-agent-form" class="hidden" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
+          <input id="new-agent-name" class="config-input" placeholder="Name (z.B. Claude Code)">
+          <input id="new-agent-id" class="config-input" placeholder="ID (z.B. claude-code)">
+          <input id="new-agent-command" class="config-input" placeholder="Befehl (z.B. claude)">
+          <input id="new-agent-args" class="config-input" placeholder="Args (z.B. --print)">
+          <input id="new-agent-workdir" class="config-input" placeholder="Arbeitsverzeichnis">
+          <input id="new-agent-color" class="config-input" placeholder="Farbe (z.B. #89b4fa)">
+          <button class="btn-primary" onclick="saveNewAgent()">Agent speichern</button>
+          <span id="agent-save-msg"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

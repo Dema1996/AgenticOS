@@ -1,0 +1,18 @@
+{
+  "name": "agenticos",
+  "version": "1.0.0",
+  "description": "Local AI Agent Dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4",
+    "gray-matter": "^4",
+    "marked": "^12"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

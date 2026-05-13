@@ -1,0 +1,5 @@
+node_modules/
+data/task-history.json
+config.json
+.DS_Store
+*.log
