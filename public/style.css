@@ -660,6 +660,45 @@ body {
 .skill-card:hover .skill-card-run { opacity: 1; }
 .skill-card-run:hover { background: var(--lavender); }
 
+.skill-card-delete {
+  position: absolute; top: 10px; right: 10px;
+  background: none; border: none; border-radius: 5px;
+  color: var(--overlay0); padding: 2px 5px;
+  font-size: 13px; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s, color 0.12s;
+  line-height: 1;
+}
+.skill-card:hover .skill-card-delete { opacity: 1; }
+.skill-card-delete:hover { color: var(--red); }
+
+/* Trash view */
+.trash-nav-badge {
+  background: var(--red); color: var(--crust);
+  border-radius: 9px; font-size: 10px; font-weight: 700;
+  padding: 1px 6px; margin-left: 6px; vertical-align: middle;
+}
+.trash-item {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface0); border-radius: 8px;
+  padding: 12px 16px; margin-bottom: 8px;
+  border: 1px solid var(--surface1);
+}
+.trash-item-icon {
+  font-size: 18px; opacity: 0.6; flex-shrink: 0;
+}
+.trash-item-info { flex: 1; min-width: 0; }
+.trash-item-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.trash-item-meta { font-size: 11px; color: var(--overlay0); margin-top: 2px; }
+.trash-item-days {
+  font-size: 11px; font-weight: 600;
+  padding: 2px 8px; border-radius: 5px;
+  background: rgba(243,139,168,0.12); color: var(--red);
+  flex-shrink: 0;
+}
+.trash-item-days.safe {
+  background: rgba(166,227,161,0.12); color: var(--green);
+}
+
 /* Skill detail */
 .skill-detail-header {
   display: flex; align-items: center; gap: 10px;
