@@ -1142,6 +1142,15 @@ function setupEventListeners() {
   document.getElementById('todo-overlay').addEventListener('click', e => {
     if (e.target.id === 'todo-overlay') closeNewTodoModal();
   });
+
+  // Run-command modal: Escape closes, backdrop closes, Enter submits
+  document.getElementById('run-command-args').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); executeSlashCommand(); }
+    if (e.key === 'Escape') closeRunCommandModal();
+  });
+  document.getElementById('run-command-overlay').addEventListener('click', e => {
+    if (e.target.id === 'run-command-overlay') closeRunCommandModal();
+  });
 }
 
 // ── Layout toggles ─────────────────────────────────────────────────────────
@@ -1402,6 +1411,7 @@ function openSkill(id) {
   document.getElementById('skill-detail-editor').classList.add('hidden');
   document.getElementById('btn-skill-mode').textContent = 'Bearbeiten';
   document.getElementById('btn-skill-save').classList.add('hidden');
+  document.getElementById('btn-skill-run').classList.add('hidden');
   document.getElementById('skill-save-msg').textContent = '';
   currentCommandId = null;
 }
@@ -1819,6 +1829,7 @@ function renderCommandCards() {
       <div class="skill-card-accent" style="background:var(--mauve)"></div>
       <div class="skill-card-name">${esc(c.name)}</div>
       <div class="skill-card-desc" style="color:var(--overlay0);font-size:11px">${esc(c.scope)}</div>
+      <button class="skill-card-run" onclick="openRunCommandModal('${esc(c.id)}',event)" title="Auf Agent ausführen">▶ Run</button>
     </div>
   `).join('');
 }
@@ -1840,6 +1851,7 @@ function openCommand(id) {
   document.getElementById('skill-detail-editor').classList.add('hidden');
   document.getElementById('btn-skill-mode').textContent = 'Bearbeiten';
   document.getElementById('btn-skill-save').classList.add('hidden');
+  document.getElementById('btn-skill-run').classList.remove('hidden');
   document.getElementById('skill-save-msg').textContent = '';
 }
 
@@ -1915,4 +1927,69 @@ async function createCommand() {
     await loadCommands();
     openCommand(data.id);
   } catch { msg.textContent = 'Netzwerkfehler'; }
+}
+
+// ── Run Command modal ──────────────────────────────────────────────────────
+let runCommandId = null;
+
+function openRunCommandModal(id, evt) {
+  if (evt) evt.stopPropagation();
+  runCommandId = id;
+  const cmd = commands.find(c => c.id === id);
+  if (!cmd) return;
+
+  document.getElementById('run-command-title').textContent = `${cmd.name} ausführen`;
+  document.getElementById('run-command-args').value = '';
+  document.getElementById('run-command-err').style.display = 'none';
+
+  const select = document.getElementById('run-command-agent');
+  select.innerHTML = agents.map(a =>
+    `<option value="${esc(a.id)}"${a.id === currentAgentId ? ' selected' : ''}>${esc(a.name)}</option>`
+  ).join('');
+
+  document.getElementById('run-command-overlay').classList.remove('hidden');
+  setTimeout(() => document.getElementById('run-command-args').focus(), 50);
+}
+
+function openRunCommandModalFromDetail() {
+  if (currentCommandId) openRunCommandModal(currentCommandId);
+}
+
+function closeRunCommandModal() {
+  document.getElementById('run-command-overlay').classList.add('hidden');
+  runCommandId = null;
+}
+
+async function executeSlashCommand() {
+  if (!runCommandId) return;
+  const agentId = document.getElementById('run-command-agent').value;
+  const args    = document.getElementById('run-command-args').value.trim();
+  const prompt  = args ? `/${runCommandId} ${args}` : `/${runCommandId}`;
+  const errEl   = document.getElementById('run-command-err');
+
+  if (!agentId) { errEl.textContent = 'Bitte einen Agenten auswählen'; errEl.style.display = ''; return; }
+
+  closeRunCommandModal();
+
+  selectAgent(agentId);
+
+  try {
+    const r = await fetch(`/api/agents/${agentId}/task`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const { taskId, error } = await r.json();
+    if (error) throw new Error(error);
+
+    currentTaskId = taskId;
+    setPanelMode('chat');
+    appendChatTurn(prompt, taskId);
+    setStatus('● Läuft…');
+    streamOutput(agentId, taskId);
+    setTimeout(loadAgents, 400);
+  } catch (e) {
+    setStatus(`Fehler: ${e.message}`);
+    document.getElementById('btn-send').disabled = false;
+  }
 }

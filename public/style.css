@@ -650,6 +650,15 @@ body {
   font-size: 12px; color: var(--subtext0); line-height: 1.5;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
+.skill-card-run {
+  position: absolute; bottom: 10px; right: 10px;
+  background: var(--mauve); color: var(--crust);
+  border: none; border-radius: 6px; padding: 3px 9px;
+  font-size: 11px; font-weight: 600; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s;
+}
+.skill-card:hover .skill-card-run { opacity: 1; }
+.skill-card-run:hover { background: var(--lavender); }
 
 /* Skill detail */
 .skill-detail-header {

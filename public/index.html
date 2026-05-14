@@ -230,6 +230,7 @@
             <span id="skill-detail-name" class="skill-detail-title"></span>
             <div style="display:flex;gap:8px;margin-left:auto;align-items:center">
               <span id="skill-save-msg" style="font-size:12px;color:var(--green)"></span>
+              <button id="btn-skill-run" class="btn-secondary hidden" onclick="openRunCommandModalFromDetail()">▶ Ausführen</button>
               <button id="btn-skill-mode" class="btn-secondary" onclick="skillDetailToggleEdit()">Bearbeiten</button>
               <button id="btn-skill-save" class="btn-primary hidden" onclick="skillDetailSave()">Speichern</button>
             </div>
@@ -440,6 +441,33 @@
           <button class="btn-primary" onclick="saveNewAgent()">Agent speichern</button>
           <span id="agent-save-msg"></span>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Run Command modal ─────────────────────────────────────────────────────── -->
+<div id="run-command-overlay" class="overlay hidden">
+  <div class="modal" style="width:380px">
+    <div class="modal-header">
+      <span id="run-command-title" class="modal-title">Command ausführen</span>
+      <button class="icon-btn" onclick="closeRunCommandModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="cfg-tab-panel">
+        <div class="config-field">
+          <label>Agent</label>
+          <select id="run-command-agent" class="config-input"></select>
+        </div>
+        <div class="config-field">
+          <label>Argumente <span style="font-weight:400;color:var(--overlay0)">(optional)</span></label>
+          <input id="run-command-args" class="config-input" type="text" placeholder="z.B. --verbose">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+          <button class="btn-secondary" onclick="closeRunCommandModal()">Abbrechen</button>
+          <button class="btn-primary" onclick="executeSlashCommand()">▶ Ausführen</button>
+        </div>
+        <div id="run-command-err" style="font-size:12px;color:var(--red);display:none"></div>
       </div>
     </div>
   </div>
