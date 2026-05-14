@@ -71,6 +71,10 @@
         <a class="nav-link" data-view="plugins" onclick="setView('plugins')">
           <i data-lucide="blocks"></i> Plugins
         </a>
+        <a class="nav-link" data-view="trash" onclick="setView('trash')">
+          <i data-lucide="trash-2"></i> Papierkorb
+          <span id="trash-count-badge" class="trash-nav-badge hidden"></span>
+        </a>
       </div>
     </aside>
 
@@ -231,6 +235,7 @@
             <div style="display:flex;gap:8px;margin-left:auto;align-items:center">
               <span id="skill-save-msg" style="font-size:12px;color:var(--green)"></span>
               <button id="btn-skill-run" class="btn-secondary hidden" onclick="openRunCommandModalFromDetail()">▶ Ausführen</button>
+              <button id="btn-skill-delete" class="icon-btn" style="color:var(--red)" title="In Papierkorb verschieben" onclick="deleteSkillOrCommandFromDetail()">🗑</button>
               <button id="btn-skill-mode" class="btn-secondary" onclick="skillDetailToggleEdit()">Bearbeiten</button>
               <button id="btn-skill-save" class="btn-primary hidden" onclick="skillDetailSave()">Speichern</button>
             </div>
@@ -281,6 +286,19 @@
           <div id="plugins-available-title" class="plugins-section-title">Verfügbar im Marketplace</div>
           <div id="plugins-loading" style="padding:40px;text-align:center;color:var(--overlay0);font-size:13px">Lade Plugins…</div>
           <div id="plugins-grid" class="plugins-grid"></div>
+        </section>
+      </div>
+
+      <!-- Trash view -->
+      <div id="view-trash" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">PAPIERKORB</span>
+            <span id="trash-item-count" class="badge-count"></span>
+            <span style="font-size:11px;color:var(--overlay0);margin-left:8px">Elemente werden nach 31 Tagen endgültig gelöscht</span>
+            <button class="text-btn" onclick="loadTrash()">↺</button>
+          </div>
+          <div id="trash-list"></div>
         </section>
       </div>
 

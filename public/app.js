@@ -67,7 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function loadAll() {
   await loadConfig();
-  await Promise.all([loadAgents(), loadProjects(), loadTodos()]);
+  await Promise.all([loadAgents(), loadProjects(), loadTodos(), loadTrash()]);
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -952,6 +952,7 @@ function setView(view) {
   if (view === 'skills') loadSkills();
   if (view === 'plugins') loadPlugins();
   if (view === 'claudemd') loadClaudemdView();
+  if (view === 'trash') loadTrash();
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -1316,6 +1317,104 @@ function setupPanelResize() {
   });
 }
 
+// ── Trash ─────────────────────────────────────────────────────────────────
+let trashItems = [];
+
+async function loadTrash() {
+  try {
+    const r = await fetch('/api/trash');
+    trashItems = await r.json();
+    renderTrash();
+    updateTrashBadge();
+  } catch {}
+}
+
+function updateTrashBadge() {
+  const badge = document.getElementById('trash-count-badge');
+  if (!badge) return;
+  if (trashItems.length > 0) {
+    badge.textContent = trashItems.length;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+function renderTrash() {
+  const list  = document.getElementById('trash-list');
+  const count = document.getElementById('trash-item-count');
+  if (!list) return;
+  if (count) count.textContent = `${trashItems.length} Elemente`;
+  if (!trashItems.length) {
+    list.innerHTML = '<div class="empty-state">Papierkorb ist leer</div>';
+    return;
+  }
+  list.innerHTML = trashItems.map(item => {
+    const icon  = item.type === 'skill' ? '🧩' : '/';
+    const safe  = item.daysLeft > 7;
+    const meta  = `${item.type === 'skill' ? 'Skill' : 'Slash Command'} · gelöscht ${new Date(item.deletedAt).toLocaleDateString('de-DE')}`;
+    return `
+    <div class="trash-item">
+      <div class="trash-item-icon">${icon}</div>
+      <div class="trash-item-info">
+        <div class="trash-item-name">${esc(item.name)}</div>
+        <div class="trash-item-meta">${esc(meta)}</div>
+      </div>
+      <div class="trash-item-days ${safe ? 'safe' : ''}">noch ${item.daysLeft}d</div>
+      <button class="btn-secondary" style="font-size:12px;padding:4px 10px" onclick="restoreTrashItem('${esc(item.trashId)}')">↩ Wiederherstellen</button>
+      <button class="icon-btn" style="color:var(--red);padding:4px 8px" title="Endgültig löschen" onclick="permanentDeleteTrashItem('${esc(item.trashId)}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+async function deleteSkill(id, evt) {
+  if (evt) evt.stopPropagation();
+  try {
+    const r = await fetch(`/api/skills/${id}`, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.error || 'Fehler'); return; }
+    await loadSkills();
+    await loadTrash();
+  } catch {}
+}
+
+async function deleteCommand(id, dir, evt) {
+  if (evt) evt.stopPropagation();
+  try {
+    const url = `/api/commands/${id}${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`;
+    const r = await fetch(url, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.error || 'Fehler'); return; }
+    await loadCommands();
+    await loadTrash();
+  } catch {}
+}
+
+async function restoreTrashItem(trashId) {
+  try {
+    const r = await fetch(`/api/trash/${trashId}/restore`, { method: 'POST' });
+    if (!r.ok) { const d = await r.json(); alert(d.error || 'Fehler beim Wiederherstellen'); return; }
+    await loadTrash();
+    await loadSkills();
+  } catch {}
+}
+
+async function permanentDeleteTrashItem(trashId) {
+  if (!confirm('Endgültig löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) return;
+  try {
+    await fetch(`/api/trash/${trashId}`, { method: 'DELETE' });
+    await loadTrash();
+  } catch {}
+}
+
+function deleteSkillOrCommandFromDetail() {
+  if (currentCommandId) {
+    deleteCommand(currentCommandId, currentCommandDir);
+    closeSkillDetail();
+  } else if (currentSkillId) {
+    deleteSkill(currentSkillId);
+    closeSkillDetail();
+  }
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────
 function stripAnsi(str) {
   return String(str)
@@ -1391,6 +1490,7 @@ function renderSkillCards() {
       <div class="skill-card-accent"></div>
       <div class="skill-card-name">${esc(s.name)}</div>
       <div class="skill-card-desc">${esc(s.description || '—')}</div>
+      <button class="skill-card-delete" onclick="deleteSkill('${esc(s.id)}',event)" title="In Papierkorb verschieben">🗑</button>
     </div>
   `).join('');
 }
@@ -1830,6 +1930,7 @@ function renderCommandCards() {
       <div class="skill-card-name">${esc(c.name)}</div>
       <div class="skill-card-desc" style="color:var(--overlay0);font-size:11px">${esc(c.scope)}</div>
       <button class="skill-card-run" onclick="openRunCommandModal('${esc(c.id)}',event)" title="Auf Agent ausführen">▶ Run</button>
+      <button class="skill-card-delete" onclick="deleteCommand('${esc(c.id)}','${esc(c.dir)}',event)" title="In Papierkorb verschieben">🗑</button>
     </div>
   `).join('');
 }

@@ -13,6 +13,8 @@ const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const DATA_DIR = path.join(ROOT, 'data');
 const HISTORY_PATH = path.join(DATA_DIR, 'task-history.json');
+const TRASH_PATH = path.join(DATA_DIR, 'trash.json');
+const TRASH_RETENTION_DAYS = 31;
 
 function readConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
@@ -35,6 +37,23 @@ catch { taskHistory = []; }
 function saveTasks() {
   try { fs.writeFileSync(HISTORY_PATH, JSON.stringify(taskHistory.slice(0, 200), null, 2)); }
   catch {}
+}
+
+// ── Trash helpers ─────────────────────────────────────────────────────────────
+function readTrash() {
+  try { return JSON.parse(fs.readFileSync(TRASH_PATH, 'utf8')); }
+  catch { return []; }
+}
+function writeTrash(items) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(TRASH_PATH, JSON.stringify(items, null, 2));
+}
+function cleanupTrash(items) {
+  const cutoff = Date.now() - TRASH_RETENTION_DAYS * 86400_000;
+  return items.filter(i => new Date(i.deletedAt).getTime() > cutoff);
+}
+function trashId() {
+  return `trash-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
 // ── Static ────────────────────────────────────────────────────────────────────
@@ -481,6 +500,32 @@ app.post('/api/skills', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.delete('/api/skills/:id', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  const skillsBase = path.join(vaultPath, '.claude', 'skills');
+  try {
+    const skillDir = safePath(skillsBase, req.params.id);
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    const content = fs.existsSync(skillFile) ? fs.readFileSync(skillFile, 'utf8') : '';
+    const { data } = matter(content);
+
+    const trash = cleanupTrash(readTrash());
+    trash.unshift({
+      trashId: trashId(),
+      type: 'skill',
+      id: req.params.id,
+      name: data.name || req.params.id,
+      content,
+      originalDir: skillDir,
+      deletedAt: new Date().toISOString(),
+    });
+    writeTrash(trash);
+    fs.rmSync(skillDir, { recursive: true, force: true });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── CLAUDE.md (per agent workDir) ─────────────────────────────────────────────
 app.get('/api/claudemd', (req, res) => {
   const { agentId } = req.query;
@@ -636,9 +681,56 @@ app.delete('/api/commands/:id', (req, res) => {
   const base = dir || USER_COMMANDS_DIR;
   try {
     const p = safePath(base, `${req.params.id}.md`);
+    const content = fs.readFileSync(p, 'utf8');
+
+    const trash = cleanupTrash(readTrash());
+    trash.unshift({
+      trashId: trashId(),
+      type: 'command',
+      id: req.params.id,
+      name: `/${req.params.id}`,
+      content,
+      originalPath: p,
+      deletedAt: new Date().toISOString(),
+    });
+    writeTrash(trash);
     fs.unlinkSync(p);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Trash ─────────────────────────────────────────────────────────────────────
+app.get('/api/trash', (_req, res) => {
+  const items = cleanupTrash(readTrash());
+  writeTrash(items); // persist cleanup
+  res.json(items.map(i => ({
+    ...i,
+    daysLeft: Math.ceil((new Date(i.deletedAt).getTime() + TRASH_RETENTION_DAYS * 86400_000 - Date.now()) / 86400_000),
+  })));
+});
+
+app.post('/api/trash/:trashId/restore', (req, res) => {
+  const trash = cleanupTrash(readTrash());
+  const item = trash.find(i => i.trashId === req.params.trashId);
+  if (!item) return res.status(404).json({ error: 'Nicht gefunden' });
+  try {
+    if (item.type === 'skill') {
+      fs.mkdirSync(item.originalDir, { recursive: true });
+      fs.writeFileSync(path.join(item.originalDir, 'SKILL.md'), item.content, 'utf8');
+    } else {
+      const dir = path.dirname(item.originalPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(item.originalPath, item.content, 'utf8');
+    }
+    writeTrash(trash.filter(i => i.trashId !== req.params.trashId));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/trash/:trashId', (_req, res) => {
+  const trash = cleanupTrash(readTrash());
+  writeTrash(trash.filter(i => i.trashId !== _req.params.trashId));
+  res.json({ ok: true });
 });
 
 // ── Generic SSE stream (for exec tasks) ──────────────────────────────────────
