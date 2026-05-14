@@ -10,7 +10,8 @@
   "dependencies": {
     "express": "^4",
     "gray-matter": "^4",
-    "marked": "^12"
+    "marked": "^12",
+    "sortablejs": "^1.15.7"
   },
   "devDependencies": {
     "playwright": "^1.60.0"

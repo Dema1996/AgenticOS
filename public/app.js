@@ -14,8 +14,23 @@ let panelMode       = 'chat';
 let sseSource       = null;
 let execHistory     = [];
 
+let skills          = [];
+let currentSkillId  = null;
+let skillEditMode   = false;
+
+let commands        = [];
+let currentCommandId = null;
+let currentCommandDir = null;
+let commandEditMode = false;
+
+let claudemdEditMode = false;
+let claudemdAgentId  = null;
+
 // Index-based todo storage for safe event delegation
 let renderedTodos = [];
+
+// Markdown output buffer (accumulates stdout per chat turn)
+let mdBuffer = '';
 
 // ── In-progress state (localStorage) ──────────────────────────────────────
 const IP_KEY = 'agenticos_inprogress';
@@ -30,6 +45,17 @@ function todoKey(file, text) { return `${file}::${text}`; }
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  // Lucide icons
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  // marked.js + highlight.js
+  if (typeof marked !== 'undefined') {
+    marked.use({
+      breaks: true,
+      gfm: true,
+    });
+  }
+
   clearTerminal();
   restorePanelWidth();
   restoreLayoutState();
@@ -171,13 +197,18 @@ function renderProjectsGrid(id, list) {
   }
   grid.innerHTML = list.map(p => {
     const color = statusColor(p.status);
-    const projTodos  = todos.filter(t => t.file && t.file.replace('.md','').toLowerCase() === p.id.toLowerCase());
-    const doneTodos  = projTodos.filter(t => t.status === 'done');
+    const pid = p.id.toLowerCase();
+    const projTodos = todos.filter(t => t.project && t.project.toLowerCase() === pid);
+    const openTodos = projTodos.filter(t => t.status !== 'done');
+    const doneTodos = projTodos.filter(t => t.status === 'done');
     const pct = projTodos.length > 0 ? Math.round(doneTodos.length / projTodos.length * 100) : -1;
-    return `<div class="project-card">
+    return `<div class="project-card" onclick="openProject('${esc(p.id)}','${esc(p.title || p.id)}')">
       <div class="card-color-bar" style="background:${color}"></div>
       <div class="card-body">
-        <div class="card-title">${esc(p.title || p.id.replace(/-/g,' '))}</div>
+        <div class="card-title-row">
+          <div class="card-title">${esc(p.title || p.id.replace(/-/g,' '))}</div>
+          ${openTodos.length > 0 ? `<span class="card-open-count" title="${openTodos.length} offene Todo${openTodos.length !== 1 ? 's' : ''}">${openTodos.length}</span>` : ''}
+        </div>
         <div class="card-meta">
           <span class="status-badge" style="color:${color};border-color:${hexAlpha(color,0.6)};background:${hexAlpha(color,0.1)}">${esc(p.status || '—')}</span>
           ${p.priority ? `<span class="priority-badge">${esc(p.priority)}</span>` : ''}
@@ -189,9 +220,49 @@ function renderProjectsGrid(id, list) {
           </div>
           <div class="progress-text">${pct}% · ${doneTodos.length}/${projTodos.length} Todos</div>
         ` : ''}
+        <button class="card-new-todo-btn" title="Neues Todo anlegen"
+          onclick="event.stopPropagation(); newTodoForProject('${esc(p.id)}','${esc(p.title || p.id)}','${esc(p.scope || 'privat')}')">
+          + Todo
+        </button>
       </div>
     </div>`;
   }).join('');
+}
+
+function newTodoForProject(projectId, projectTitle, scope) {
+  const today = new Date().toISOString().split('T')[0];
+  const template =
+`Lege ein neues Todo für das Projekt "${projectTitle}" an.
+
+Erstelle die Datei todos/${projectId}/[titel-als-kebab-case].md mit diesem Frontmatter:
+
+---
+title: "[TITEL DES TODOS]"
+type: todo
+scope: ${scope}
+status: open
+priority: medium
+project: "[[projects/${projectId}]]"
+created: ${today}
+updated: ${today}
+tags: []
+---
+
+Ersetze [TITEL DES TODOS] und [titel-als-kebab-case] mit dem passenden Inhalt.`;
+
+  focusTaskInput();
+  const input = document.getElementById('task-input');
+  if (input) input.value = template;
+}
+
+function openProject(projectId, projectTitle) {
+  setView('todos');
+  renderAllTodos(projectId);
+  const input = document.getElementById('task-input');
+  if (input) {
+    input.value = `Was ist der aktuelle Stand von Projekt "${projectTitle}"? Gibt es offene Todos oder nächste Schritte?`;
+    focusTaskInput();
+  }
 }
 
 // ── Todos ──────────────────────────────────────────────────────────────────
@@ -202,15 +273,35 @@ async function loadTodos() {
     renderKanban();
     renderAllTodos();
     renderProjects();
+    const btn = document.getElementById('todos-new-btn');
+    if (btn) btn.style.display = 'none';
   } catch {}
 }
 
-function renderKanban() {
+function renderKanban(filterProject) {
+  // Keep dropdown in sync; if called from onchange, filterProject is passed directly
+  const sel = document.getElementById('kanban-filter');
+  if (filterProject === undefined) filterProject = sel ? sel.value : '';
+  else if (sel) sel.value = filterProject;
+
+  // Rebuild dropdown options from current todos (deduplicated)
+  if (sel) {
+    const projects = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Alle Projekte</option>' +
+      projects.map(p => `<option value="${esc(p)}"${p === current ? ' selected' : ''}>${esc(p.replace(/-/g,' '))}</option>`).join('');
+    sel.value = filterProject || '';
+  }
+
   renderedTodos = [];
   const inProgress = getInProgress();
   const open = [], ip = [], done = [];
 
-  for (const t of todos) {
+  const list = filterProject
+    ? todos.filter(t => t.project === filterProject)
+    : todos;
+
+  for (const t of list) {
     if (t.status === 'done') done.push(t);
     else if (inProgress.has(todoKey(t.file, t.text))) ip.push(t);
     else open.push(t);
@@ -225,6 +316,51 @@ function renderKanban() {
   fillCol('cards-open',       open,            'open');
   fillCol('cards-inprogress', ip,              'ip');
   fillCol('cards-done',       done.slice(0,25),'done');
+
+  if (typeof Sortable !== 'undefined') initSortable();
+}
+
+function initSortable() {
+  const colIds = ['cards-open', 'cards-inprogress', 'cards-done'];
+  colIds.forEach(colId => {
+    const el = document.getElementById(colId);
+    if (!el) return;
+    Sortable.create(el, {
+      group: 'kanban',
+      animation: 150,
+      ghostClass: 'drag-ghost',
+      chosenClass: 'drag-chosen',
+      onEnd(evt) {
+        const toCol   = evt.to.id;
+        const fromCol = evt.from.id;
+        if (toCol === fromCol) return;
+
+        const idx  = parseInt(evt.item.dataset.todoIdx, 10);
+        const todo = renderedTodos[idx];
+        if (!todo) return;
+
+        const ip  = getInProgress();
+        const key = todoKey(todo.file, todo.text);
+
+        if (fromCol === 'cards-done') {
+          // Reopen: call API, then optionally mark in-progress
+          if (toCol === 'cards-inprogress') ip.add(key);
+          saveInProgress(ip);
+          toggleTodo(todo.file, todo.text, 'open');
+        } else if (toCol === 'cards-done') {
+          ip.delete(key);
+          saveInProgress(ip);
+          toggleTodo(todo.file, todo.text, 'done');
+        } else {
+          // open <-> inprogress (localStorage only)
+          if (toCol === 'cards-inprogress') ip.add(key);
+          else ip.delete(key);
+          saveInProgress(ip);
+          loadTodos();
+        }
+      },
+    });
+  });
 }
 
 function fillCol(containerId, items, colType) {
@@ -242,7 +378,8 @@ function fillCol(containerId, items, colType) {
     return `<div class="todo-card" data-todo-idx="${idx}">
       <div class="todo-text${isDone ? ' done-text' : ''}">${esc(t.text)}</div>
       <div class="todo-meta">
-        <span class="todo-project">${esc(proj)}</span>
+        <select class="card-assign-select" data-file="${esc(t.file)}" data-text="${esc(t.text)}" data-status="${t.status}"
+          onchange="assignTodo(this)" title="Projekt zuweisen">${projectSelectOptions(t.project)}</select>
         <div class="todo-actions">
           ${colType === 'open' ? `<button class="todo-btn" data-action="toip" title="In Arbeit">→</button>` : ''}
           ${colType === 'open' ? `<button class="todo-btn done-btn" data-action="done" title="Erledigt">✓</button>` : ''}
@@ -255,19 +392,309 @@ function fillCol(containerId, items, colType) {
   }).join('');
 }
 
-function renderAllTodos() {
+let todosViewMode = 'list';
+
+function setTodosView(mode) {
+  todosViewMode = mode;
+  document.getElementById('todos-view-list')?.classList.toggle('active', mode === 'list');
+  document.getElementById('todos-view-kanban')?.classList.toggle('active', mode === 'kanban');
+  document.getElementById('all-todos-list')?.classList.toggle('hidden', mode === 'kanban');
+  document.getElementById('todos-kanban-board')?.classList.toggle('hidden', mode === 'list');
+  const filter = document.getElementById('todos-filter')?.value || '';
+  if (mode === 'kanban') renderTodosKanban(filter);
+  else renderAllTodos(filter);
+}
+
+function renderTodosKanban(filterProject = '') {
+  renderedTodos = [];
+  const inProgress = getInProgress();
+
+  // Sync project-status dropdown
+  const statusLabel = document.getElementById('project-status-label');
+  const statusSel   = document.getElementById('project-status-select');
+  if (statusLabel && statusSel) {
+    if (filterProject && filterProject !== '__inbox__') {
+      const project = projects.find(p => p.id === filterProject);
+      if (project) {
+        statusSel.value = (project.status || 'active').toLowerCase();
+        statusLabel.classList.remove('hidden');
+      } else {
+        statusLabel.classList.add('hidden');
+      }
+    } else {
+      statusLabel.classList.add('hidden');
+    }
+  }
+
+  let list = todos;
+  if (filterProject === '__inbox__') list = todos.filter(t => !t.project);
+  else if (filterProject) list = todos.filter(t => t.project === filterProject);
+
+  const open = [], ip = [], done = [];
+  for (const t of list) {
+    if (t.status === 'done') done.push(t);
+    else if (inProgress.has(todoKey(t.file, t.text))) ip.push(t);
+    else open.push(t);
+  }
+
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('tcount-open', open.length);
+  set('tcount-inprogress', ip.length);
+  set('tcount-done', done.length);
+
+  fillColGeneric('tcards-open', open, 'open');
+  fillColGeneric('tcards-inprogress', ip, 'ip');
+  fillColGeneric('tcards-done', done.slice(0, 50), 'done');
+  initTodosSortable(filterProject);
+}
+
+function initTodosSortable(filterProject = '') {
+  if (typeof Sortable === 'undefined') return;
+  const colIds = ['tcards-open', 'tcards-inprogress', 'tcards-done'];
+  colIds.forEach(colId => {
+    const el = document.getElementById(colId);
+    if (!el) return;
+    if (el._sortable) { el._sortable.destroy(); }
+    el._sortable = Sortable.create(el, {
+      group: 'todos-kanban',
+      animation: 150,
+      ghostClass: 'drag-ghost',
+      chosenClass: 'drag-chosen',
+      onEnd(evt) {
+        const toCol   = evt.to.id;
+        const fromCol = evt.from.id;
+        if (toCol === fromCol) return;
+
+        const idx  = parseInt(evt.item.dataset.todoIdx, 10);
+        const todo = renderedTodos[idx];
+        if (!todo) return;
+
+        const ip  = getInProgress();
+        const key = todoKey(todo.file, todo.text);
+
+        if (fromCol === 'tcards-done') {
+          if (toCol === 'tcards-inprogress') ip.add(key);
+          saveInProgress(ip);
+          toggleTodo(todo.file, todo.text, 'open');
+        } else if (toCol === 'tcards-done') {
+          ip.delete(key);
+          saveInProgress(ip);
+          toggleTodo(todo.file, todo.text, 'done');
+        } else {
+          if (toCol === 'tcards-inprogress') ip.add(key);
+          else ip.delete(key);
+          saveInProgress(ip);
+          renderTodosKanban(filterProject);
+        }
+      },
+    });
+  });
+}
+
+function onTodosFilter(projectId) {
+  // Show/hide project status dropdown based on whether a specific project is selected
+  const label = document.getElementById('project-status-label');
+  const sel = document.getElementById('project-status-select');
+  if (label && sel && projectId && projectId !== '__inbox__') {
+    const project = projects.find(p => p.id === projectId);
+    if (project) {
+      sel.value = (project.status || 'active').toLowerCase();
+      label.classList.remove('hidden');
+    }
+  } else if (label) {
+    label.classList.add('hidden');
+  }
+  if (todosViewMode === 'kanban') renderTodosKanban(projectId);
+  else renderAllTodos(projectId);
+}
+
+async function updateProjectStatus(status) {
+  const projectId = document.getElementById('todos-filter')?.value;
+  if (!projectId || projectId === '__inbox__') return;
+  try {
+    await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    // Update local projects array so the card reflects the change immediately
+    const p = projects.find(p => p.id === projectId);
+    if (p) p.status = status;
+  } catch {}
+}
+
+function fillColGeneric(containerId, items, colType) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = '<div style="padding:10px;text-align:center;color:var(--overlay0);font-size:12px">—</div>';
+    return;
+  }
+  el.innerHTML = items.map(t => {
+    const idx = renderedTodos.length;
+    renderedTodos.push({ ...t, colType });
+    const proj = t.project ? t.project.replace(/-/g,' ') : (t.file ? t.file.replace('.md','') : '');
+    const isDone = colType === 'done';
+    return `<div class="todo-card" data-todo-idx="${idx}">
+      <div class="todo-text${isDone ? ' done-text' : ''}">${esc(t.text)}</div>
+      <div class="todo-meta">
+        <select class="card-assign-select" data-file="${esc(t.file)}" data-text="${esc(t.text)}" data-status="${t.status}"
+          onchange="assignTodo(this)" title="Projekt zuweisen">${projectSelectOptions(t.project)}</select>
+        <div class="todo-actions">
+          ${colType === 'open' ? `<button class="todo-btn" data-action="toip" title="In Arbeit">→</button>` : ''}
+          ${colType === 'open' ? `<button class="todo-btn done-btn" data-action="done" title="Erledigt">✓</button>` : ''}
+          ${colType === 'ip'   ? `<button class="todo-btn reopen-btn" data-action="toopen" title="Zurück">←</button>` : ''}
+          ${colType === 'ip'   ? `<button class="todo-btn done-btn" data-action="done" title="Erledigt">✓</button>` : ''}
+          ${colType === 'done' ? `<button class="todo-btn reopen-btn" data-action="reopen" title="Wieder öffnen">↩</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openNewTodoModal() {
+  // Pre-select current filter project
+  const filterVal = document.getElementById('todos-filter')?.value || '';
+  const projectIds = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
+  const sel = document.getElementById('todo-project');
+  if (sel) {
+    sel.innerHTML = '<option value="__inbox__">📥 Inbox</option>' +
+      projectIds.map(p => `<option value="${esc(p)}">${esc(p.replace(/-/g,' '))}</option>`).join('');
+    sel.value = filterVal && filterVal !== '__inbox__' ? filterVal : '__inbox__';
+  }
+  // Set scope based on selected project
+  const proj = projects.find(p => p.id === sel?.value);
+  const scopeSel = document.getElementById('todo-scope');
+  if (scopeSel && proj?.scope) scopeSel.value = proj.scope;
+
+  document.getElementById('todo-title').value = '';
+  document.getElementById('todo-tags').value = '';
+  document.getElementById('todo-modal-err').style.display = 'none';
+  document.getElementById('todo-overlay').classList.remove('hidden');
+  setTimeout(() => document.getElementById('todo-title').focus(), 50);
+}
+
+function onTodoProjectChange(projectId) {
+  const proj = projects.find(p => p.id === projectId);
+  const scopeSel = document.getElementById('todo-scope');
+  if (scopeSel && proj?.scope) scopeSel.value = proj.scope;
+}
+
+function closeNewTodoModal() {
+  document.getElementById('todo-overlay').classList.add('hidden');
+}
+
+async function submitNewTodo() {
+  const title    = document.getElementById('todo-title').value.trim();
+  const project  = document.getElementById('todo-project').value;
+  const priority = document.getElementById('todo-priority').value;
+  const scope    = document.getElementById('todo-scope').value;
+  const tags     = document.getElementById('todo-tags').value;
+  const errEl    = document.getElementById('todo-modal-err');
+
+  if (!title) {
+    errEl.textContent = 'Bitte einen Titel eingeben.';
+    errEl.style.display = '';
+    document.getElementById('todo-title').focus();
+    return;
+  }
+  errEl.style.display = 'none';
+
+  try {
+    const r = await fetch('/api/todos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, project, priority, scope, tags }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Fehler');
+    closeNewTodoModal();
+    loadTodos();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = '';
+  }
+}
+
+function projectSelectOptions(currentProject) {
+  const projectIds = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
+  return `<option value="__inbox__"${!currentProject ? ' selected' : ''}>📥 Inbox</option>` +
+    projectIds.map(p =>
+      `<option value="${esc(p)}"${p === currentProject ? ' selected' : ''}>${esc(p.replace(/-/g,' '))}</option>`
+    ).join('');
+}
+
+async function assignTodo(selectEl) {
+  const { file, text, status } = selectEl.dataset;
+  const newProject = selectEl.value;
+  selectEl.disabled = true;
+  try {
+    await fetch('/api/todos', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file, text, status, newProject }),
+    });
+    loadTodos();
+  } catch {
+    selectEl.disabled = false;
+  }
+}
+
+function renderAllTodos(filterProjectId = null) {
   const el = document.getElementById('all-todos-list');
   if (!el) return;
-  if (!todos.length) { el.innerHTML = '<div class="empty-state">Keine Todos vorhanden</div>'; return; }
 
+  // Sync filter dropdown — include Inbox if there are unassigned todos
+  const sel = document.getElementById('todos-filter');
+  if (sel) {
+    const projectIds = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
+    const hasInbox = todos.some(t => !t.project);
+    const cur = filterProjectId !== null ? filterProjectId : (sel.value || '');
+    sel.innerHTML = '<option value="">Alle Projekte</option>' +
+      (hasInbox ? '<option value="__inbox__">Inbox</option>' : '') +
+      projectIds.map(p => `<option value="${esc(p)}"${p === cur ? ' selected' : ''}>${esc(p.replace(/-/g,' '))}</option>`).join('');
+    sel.value = cur;
+    filterProjectId = cur || null;
+  }
+
+  // Sync project-status dropdown
+  const statusLabel = document.getElementById('project-status-label');
+  const statusSel   = document.getElementById('project-status-select');
+  if (statusLabel && statusSel) {
+    if (filterProjectId && filterProjectId !== '__inbox__') {
+      const project = projects.find(p => p.id === filterProjectId);
+      if (project) {
+        statusSel.value = (project.status || 'active').toLowerCase();
+        statusLabel.classList.remove('hidden');
+      } else {
+        statusLabel.classList.add('hidden');
+      }
+    } else {
+      statusLabel.classList.add('hidden');
+    }
+  }
+
+  let list = todos;
+  if (filterProjectId === '__inbox__') {
+    list = todos.filter(t => !t.project);
+  } else if (filterProjectId) {
+    list = todos.filter(t => t.project && t.project.toLowerCase() === filterProjectId.toLowerCase());
+  }
+
+  if (!list.length) {
+    el.innerHTML = '<div class="empty-state">Keine Todos vorhanden</div>';
+    return;
+  }
+
+  // Group by project (or inbox)
   const groups = {};
-  for (const t of todos) {
-    const g = t.file || 'inbox';
+  for (const t of list) {
+    const g = t.project || '__inbox__';
     (groups[g] = groups[g] || []).push(t);
   }
 
-  el.innerHTML = Object.entries(groups).map(([file, items]) => {
-    const title = file.replace('.md','').replace(/-/g,' ');
+  el.innerHTML = Object.entries(groups).map(([groupKey, items]) => {
+    const title = groupKey === '__inbox__' ? 'Inbox' : groupKey.replace(/-/g,' ');
     const open  = items.filter(t => t.status === 'open').length;
     return `<div class="todos-group">
       <div class="todos-group-title">${esc(title)} <span style="color:var(--overlay0);font-weight:400">${open} offen</span></div>
@@ -277,6 +704,8 @@ function renderAllTodos() {
           <span class="todo-check" data-file="${esc(t.file)}" data-text="${esc(t.text)}" data-status="${t.status}"
             title="${isDone ? 'Wieder öffnen' : 'Erledigt markieren'}">${isDone ? '☑' : '☐'}</span>
           <span class="todo-text-sm">${esc(t.text)}</span>
+          <select class="list-assign-select" data-file="${esc(t.file)}" data-text="${esc(t.text)}" data-status="${t.status}"
+            onchange="assignTodo(this)" title="Projekt zuweisen">${projectSelectOptions(t.project)}</select>
         </div>`;
       }).join('')}
     </div>`;
@@ -338,24 +767,32 @@ function renderRecentTasks(tasks) {
     }).join('');
 }
 
-function replayTask(agentId, taskId) {
-  // Switch to chat mode first
+async function replayTask(agentId, taskId) {
   setPanelMode('chat');
 
-  // If this task is already in the current chat, just scroll to it
-  const existing = document.querySelector(`.chat-turn[data-task-id="${taskId}"]`);
-  if (existing) {
-    existing.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    return;
-  }
-
-  // Switch agent if needed (clears terminal)
+  // Switch agent if needed
   if (agentId !== currentAgentId) selectAgent(agentId);
 
-  // Append this historical task to the chat
-  const task = taskHistory.find(t => t.id === taskId);
-  appendChatTurn(task?.prompt || '—', taskId, task?.startedAt);
-  streamOutput(agentId, taskId);
+  // Always clear and reload fresh
+  clearTerminal();
+
+  try {
+    const task = await fetch(`/api/tasks/${taskId}`).then(r => r.json());
+
+    appendChatTurn(task.prompt || '—', taskId, task.startedAt);
+
+    if (task.running) {
+      // Still running — stream live
+      streamOutput(agentId, taskId);
+    } else {
+      // Finished — render lines directly from history
+      for (const line of (task.lines || [])) {
+        appendLine(line.text, line.type);
+      }
+    }
+  } catch {
+    appendLine('[Fehler beim Laden der Task-Daten]', 'stderr');
+  }
 }
 
 // ── Task dispatch ──────────────────────────────────────────────────────────
@@ -422,6 +859,7 @@ function appendChatTurn(promptText, taskId, isoTimestamp = null) {
   terminal.appendChild(turn);
 
   currentBlockId = `chat-block-${taskId}`;
+  mdBuffer = '';
   terminal.scrollTop = terminal.scrollHeight;
 }
 
@@ -455,11 +893,27 @@ function appendLine(text, type) {
   if (!cleaned) return;
   const target = (currentBlockId && document.getElementById(currentBlockId))
     || document.getElementById('terminal-output');
-  const span = document.createElement('span');
-  if (type === 'stderr') span.className = 'term-stderr';
-  else if (type === 'system') span.className = 'term-system';
-  span.textContent = cleaned;
-  target.appendChild(span);
+
+  if (type === 'stdout' && typeof marked !== 'undefined') {
+    mdBuffer += cleaned;
+    let mdEl = target.querySelector('.md-output');
+    if (!mdEl) {
+      mdEl = document.createElement('div');
+      mdEl.className = 'md-output';
+      target.appendChild(mdEl);
+    }
+    mdEl.innerHTML = marked.parse(mdBuffer);
+    if (typeof hljs !== 'undefined') {
+      mdEl.querySelectorAll('pre code:not(.hljs)').forEach(el => hljs.highlightElement(el));
+    }
+  } else {
+    const span = document.createElement('span');
+    if (type === 'stderr') span.className = 'term-stderr';
+    else if (type === 'system') span.className = 'term-system';
+    span.textContent = cleaned;
+    target.appendChild(span);
+  }
+
   document.getElementById('terminal-output').scrollTop = 99999;
 }
 
@@ -467,6 +921,7 @@ function clearTerminal() {
   document.getElementById('terminal-output').innerHTML =
     '<div class="terminal-empty">Warte auf Ausgabe…</div>';
   currentBlockId = null;
+  mdBuffer = '';
 }
 
 function setStatus(msg) {
@@ -494,6 +949,9 @@ function setView(view) {
   const target = document.getElementById(`view-${view}`);
   if (target) target.classList.remove('hidden');
   if (view === 'log') loadTaskHistory();
+  if (view === 'skills') loadSkills();
+  if (view === 'plugins') loadPlugins();
+  if (view === 'claudemd') loadClaudemdView();
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -638,6 +1096,31 @@ function setupEventListeners() {
     }
   });
 
+  // Todos-page kanban delegation
+  document.getElementById('todos-kanban-board').addEventListener('click', e => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const card = btn.closest('[data-todo-idx]');
+    if (!card) return;
+    const todo = renderedTodos[parseInt(card.dataset.todoIdx, 10)];
+    if (!todo) return;
+
+    const ip  = getInProgress();
+    const key = todoKey(todo.file, todo.text);
+    const action = btn.dataset.action;
+
+    if (action === 'done') {
+      ip.delete(key); saveInProgress(ip);
+      toggleTodo(todo.file, todo.text, 'done');
+    } else if (action === 'reopen') {
+      toggleTodo(todo.file, todo.text, 'open');
+    } else if (action === 'toip') {
+      ip.add(key); saveInProgress(ip); renderTodosKanban(document.getElementById('todos-filter')?.value || '');
+    } else if (action === 'toopen') {
+      ip.delete(key); saveInProgress(ip); renderTodosKanban(document.getElementById('todos-filter')?.value || '');
+    }
+  });
+
   // All-todos list delegation
   document.getElementById('all-todos-list').addEventListener('click', e => {
     const check = e.target.closest('.todo-check');
@@ -649,6 +1132,15 @@ function setupEventListeners() {
   // Config overlay backdrop
   document.getElementById('config-overlay').addEventListener('click', e => {
     if (e.target.id === 'config-overlay') closeConfig();
+  });
+
+  // New-todo modal: Enter submits, Escape closes, backdrop closes
+  document.getElementById('todo-title').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); submitNewTodo(); }
+    if (e.key === 'Escape') closeNewTodoModal();
+  });
+  document.getElementById('todo-overlay').addEventListener('click', e => {
+    if (e.target.id === 'todo-overlay') closeNewTodoModal();
   });
 }
 
@@ -864,4 +1356,563 @@ function dur(start, end) {
   if (!start||!end) return '';
   const s=Math.round((new Date(end)-new Date(start))/1000);
   return s<60?`${s}s`:`${Math.floor(s/60)}m ${s%60}s`;
+}
+
+// ── Skills ─────────────────────────────────────────────────────────────────
+async function loadSkills() {
+  try {
+    const r = await fetch('/api/skills');
+    skills = await r.json();
+    renderSkillCards();
+  } catch {}
+  loadCommands();
+}
+
+function renderSkillCards() {
+  const grid  = document.getElementById('skills-grid');
+  const count = document.getElementById('skills-count');
+  if (!grid) return;
+  if (count) count.textContent = `${skills.length} Skills`;
+  if (!skills.length) {
+    grid.innerHTML = '<div class="empty-state">Keine Skills gefunden. Vault-Pfad korrekt konfiguriert?</div>';
+    return;
+  }
+  grid.innerHTML = skills.map(s => `
+    <div class="skill-card" onclick="openSkill('${esc(s.id)}')">
+      <div class="skill-card-accent"></div>
+      <div class="skill-card-name">${esc(s.name)}</div>
+      <div class="skill-card-desc">${esc(s.description || '—')}</div>
+    </div>
+  `).join('');
+}
+
+function openSkill(id) {
+  const skill = skills.find(s => s.id === id);
+  if (!skill) return;
+  currentSkillId = id;
+  skillEditMode  = false;
+
+  document.getElementById('skills-list-section').classList.add('hidden');
+  document.getElementById('commands-list-section').classList.add('hidden');
+  document.getElementById('skill-detail-section').classList.remove('hidden');
+  document.getElementById('skill-detail-name').textContent = skill.name;
+  document.getElementById('skill-detail-editor').value = skill.content;
+  document.getElementById('skill-detail-preview').innerHTML = marked.parse(stripFrontmatter(skill.content));
+  document.getElementById('skill-detail-preview').classList.remove('hidden');
+  document.getElementById('skill-detail-editor').classList.add('hidden');
+  document.getElementById('btn-skill-mode').textContent = 'Bearbeiten';
+  document.getElementById('btn-skill-save').classList.add('hidden');
+  document.getElementById('skill-save-msg').textContent = '';
+  currentCommandId = null;
+}
+
+function skillDetailToggleEdit() {
+  if (currentCommandId) toggleCommandEdit(); else toggleSkillEdit();
+}
+
+function skillDetailSave() {
+  if (currentCommandId) saveCommand(); else saveSkill();
+}
+
+function closeSkillDetail() {
+  currentSkillId = null;
+  skillEditMode  = false;
+  document.getElementById('skill-detail-section').classList.add('hidden');
+  document.getElementById('skills-list-section').classList.remove('hidden');
+  document.getElementById('commands-list-section').classList.remove('hidden');
+}
+
+function toggleSkillEdit() {
+  skillEditMode = !skillEditMode;
+  const preview = document.getElementById('skill-detail-preview');
+  const editor  = document.getElementById('skill-detail-editor');
+  const btnMode = document.getElementById('btn-skill-mode');
+  const btnSave = document.getElementById('btn-skill-save');
+
+  if (skillEditMode) {
+    preview.classList.add('hidden');
+    editor.classList.remove('hidden');
+    editor.focus();
+    btnMode.textContent = 'Vorschau';
+    btnSave.classList.remove('hidden');
+  } else {
+    preview.innerHTML = marked.parse(stripFrontmatter(editor.value));
+    preview.classList.remove('hidden');
+    editor.classList.add('hidden');
+    btnMode.textContent = 'Bearbeiten';
+  }
+}
+
+async function saveSkill() {
+  if (!currentSkillId) return;
+  const content = document.getElementById('skill-detail-editor').value;
+  const msgEl   = document.getElementById('skill-save-msg');
+  try {
+    const r = await fetch(`/api/skills/${currentSkillId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (r.ok) {
+      const skill = skills.find(s => s.id === currentSkillId);
+      if (skill) skill.content = content;
+      msgEl.textContent = '✓ Gespeichert';
+      setTimeout(() => { msgEl.textContent = ''; }, 2500);
+    } else {
+      msgEl.style.color = 'var(--red)';
+      msgEl.textContent = 'Fehler beim Speichern';
+    }
+  } catch {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Netzwerkfehler';
+  }
+}
+
+function openNewSkillForm() {
+  document.getElementById('new-skill-form').classList.remove('hidden');
+  document.getElementById('new-skill-id').focus();
+}
+
+function closeNewSkillForm() {
+  document.getElementById('new-skill-form').classList.add('hidden');
+  document.getElementById('new-skill-msg').textContent = '';
+}
+
+async function createSkill() {
+  const id   = document.getElementById('new-skill-id').value.trim().toLowerCase().replace(/\s+/g, '-');
+  const name = document.getElementById('new-skill-name').value.trim();
+  const msg  = document.getElementById('new-skill-msg');
+  if (!id || !name) { msg.textContent = 'ID und Name erforderlich'; return; }
+  try {
+    const r = await fetch('/api/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name }),
+    });
+    const data = await r.json();
+    if (!r.ok) { msg.textContent = data.error || 'Fehler'; return; }
+    closeNewSkillForm();
+    await loadSkills();
+    openSkill(id);
+  } catch { msg.textContent = 'Netzwerkfehler'; }
+}
+
+function stripFrontmatter(content) {
+  return content.replace(/^---[\s\S]*?---\n?/, '').trim();
+}
+
+// ── Plugins ────────────────────────────────────────────────────────────────────
+let pluginsData    = { installed: [], available: [] };
+let pluginsFiltered = [];
+
+async function loadPlugins() {
+  const loadEl = document.getElementById('plugins-loading');
+  const grid   = document.getElementById('plugins-grid');
+  if (loadEl) { loadEl.style.display = ''; grid.innerHTML = ''; }
+
+  try {
+    const r = await fetch('/api/plugins');
+    pluginsData = await r.json();
+  } catch {
+    pluginsData = { installed: [], available: [] };
+  }
+
+  pluginsFiltered = pluginsData.available || [];
+  renderPluginCards();
+}
+
+function renderPluginCards(filtered) {
+  const list     = filtered ?? pluginsFiltered;
+  const grid     = document.getElementById('plugins-grid');
+  const loadEl   = document.getElementById('plugins-loading');
+  const instSec  = document.getElementById('plugins-installed-section');
+  const instGrid = document.getElementById('plugins-installed-grid');
+  const instCount = document.getElementById('plugins-installed-count');
+  const availCount = document.getElementById('plugins-available-count');
+
+  if (!grid) return;
+  if (loadEl) loadEl.style.display = 'none';
+
+  const installed  = pluginsData.installed || [];
+  const installedIds = new Set(installed.map(p => p.name || p.pluginId));
+
+  if (instCount) instCount.textContent = `${installed.length} installiert`;
+  if (availCount) availCount.textContent = `${(pluginsData.available || []).length} verfügbar`;
+
+  // Installed section
+  if (instSec && instGrid) {
+    if (installed.length) {
+      instSec.classList.remove('hidden');
+      instGrid.innerHTML = installed.map(p => pluginCardHTML(p, true)).join('');
+    } else {
+      instSec.classList.add('hidden');
+    }
+  }
+
+  // Available grid
+  if (!list.length) {
+    grid.innerHTML = '<div class="empty-state">Keine Plugins gefunden.</div>';
+    return;
+  }
+  grid.innerHTML = list.map(p => pluginCardHTML(p, installedIds.has(p.name || p.pluginId))).join('');
+}
+
+function pluginCardHTML(p, isInstalled) {
+  const name    = esc(p.name || p.pluginId || '');
+  const desc    = esc((p.description || '').slice(0, 120)) + ((p.description || '').length > 120 ? '…' : '');
+  const count   = p.installCount != null ? fmtInstallCount(p.installCount) : '';
+  const pluginId = esc(p.pluginId || p.name || '');
+  const nameRaw  = p.name || p.pluginId || '';
+  const accentColor = pluginCategoryColor(nameRaw);
+
+  return `<div class="plugin-card">
+    <div class="plugin-card-accent" style="background:${accentColor}"></div>
+    <div class="plugin-card-body">
+      <div class="plugin-card-name">${name}</div>
+      <div class="plugin-card-desc">${desc || '—'}</div>
+      <div class="plugin-card-footer">
+        ${count ? `<span class="plugin-install-count">↓ ${count}</span>` : '<span></span>'}
+        ${isInstalled
+          ? `<button class="plugin-btn plugin-btn-uninstall" onclick="uninstallPlugin('${esc(nameRaw)}')">Deinstallieren</button>`
+          : `<button class="plugin-btn plugin-btn-install" onclick="installPlugin('${pluginId}','${name}')">Installieren</button>`
+        }
+      </div>
+    </div>
+  </div>`;
+}
+
+function fmtInstallCount(n) {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function pluginCategoryColor(name) {
+  const lower = name.toLowerCase();
+  if (/github|gitlab|git/.test(lower))    return '#f97316';
+  if (/security|auth/.test(lower))        return '#f38ba8';
+  if (/browser|playwright/.test(lower))   return '#89b4fa';
+  if (/firebase|database|db/.test(lower)) return '#fab387';
+  if (/slack|discord|telegram|message/.test(lower)) return '#a6e3a1';
+  if (/lsp|clangd|rust|java|kotlin/.test(lower)) return '#cba6f7';
+  if (/linear|asana|jira/.test(lower))   return '#89dceb';
+  if (/adobe|design|frontend/.test(lower)) return '#f9e2af';
+  return '#94e2d5';
+}
+
+function filterPlugins(query) {
+  const q = (query || '').toLowerCase().trim();
+  pluginsFiltered = q
+    ? (pluginsData.available || []).filter(p =>
+        (p.name || '').toLowerCase().includes(q) ||
+        (p.description || '').toLowerCase().includes(q)
+      )
+    : (pluginsData.available || []);
+  renderPluginCards(pluginsFiltered);
+}
+
+async function installPlugin(pluginId, displayName) {
+  openPluginProgress(`Plugin installieren: ${displayName}`);
+  try {
+    const r = await fetch('/api/plugins/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pluginId }),
+    });
+    const { taskId, error } = await r.json();
+    if (error) throw new Error(error);
+    streamPluginTask(taskId);
+  } catch (e) {
+    appendPluginOutput(`Fehler: ${e.message}`, true);
+    finishPluginProgress(false);
+  }
+}
+
+async function uninstallPlugin(name) {
+  if (!confirm(`Plugin „${name}" wirklich deinstallieren?`)) return;
+  openPluginProgress(`Plugin deinstallieren: ${name}`);
+  try {
+    const r = await fetch('/api/plugins/uninstall', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const { taskId, error } = await r.json();
+    if (error) throw new Error(error);
+    streamPluginTask(taskId);
+  } catch (e) {
+    appendPluginOutput(`Fehler: ${e.message}`, true);
+    finishPluginProgress(false);
+  }
+}
+
+function streamPluginTask(taskId) {
+  const src = new EventSource(`/api/stream?taskId=${taskId}`);
+  src.onmessage = e => {
+    const data = JSON.parse(e.data);
+    if (data.text) appendPluginOutput(stripAnsi(data.text), data.type === 'stderr');
+    if (data.done) {
+      src.close();
+      finishPluginProgress(data.exitCode === 0);
+    }
+  };
+  src.onerror = () => {
+    appendPluginOutput('\n[Verbindung getrennt]', true);
+    src.close();
+    finishPluginProgress(false);
+  };
+}
+
+function openPluginProgress(title) {
+  document.getElementById('plugin-progress-title').textContent = title;
+  document.getElementById('plugin-progress-output').textContent = '';
+  document.getElementById('plugin-progress-status').textContent = 'Läuft…';
+  document.getElementById('plugin-progress-close-btn').classList.add('hidden');
+  document.getElementById('plugin-progress-overlay').classList.remove('hidden');
+}
+
+function appendPluginOutput(text, isErr) {
+  const el = document.getElementById('plugin-progress-output');
+  if (!el) return;
+  const span = document.createElement('span');
+  if (isErr) span.style.color = 'var(--red)';
+  span.textContent = text;
+  el.appendChild(span);
+  el.scrollTop = el.scrollHeight;
+}
+
+function finishPluginProgress(success) {
+  const status = document.getElementById('plugin-progress-status');
+  const btn    = document.getElementById('plugin-progress-close-btn');
+  if (status) {
+    status.textContent = success ? '✓ Abgeschlossen' : '✗ Fehler';
+    status.style.color = success ? 'var(--green)' : 'var(--red)';
+  }
+  if (btn) btn.classList.remove('hidden');
+}
+
+function closePluginProgress(reload) {
+  document.getElementById('plugin-progress-overlay').classList.add('hidden');
+  if (reload) loadPlugins();
+}
+
+// ── CLAUDE.md editor ───────────────────────────────────────────────────────
+function loadClaudemdView() {
+  const sel = document.getElementById('claudemd-agent-select');
+  const agentsWithDir = agents.filter(a => a.workDir);
+  if (!agentsWithDir.length) {
+    sel.innerHTML = '<option value="">— Kein Agent mit Arbeitsverzeichnis —</option>';
+    document.getElementById('claudemd-no-agent').classList.remove('hidden');
+    document.getElementById('claudemd-preview').classList.add('hidden');
+    return;
+  }
+  sel.innerHTML = agentsWithDir.map(a =>
+    `<option value="${esc(a.id)}">${esc(a.name)}</option>`
+  ).join('');
+  const id = claudemdAgentId && agentsWithDir.find(a => a.id === claudemdAgentId)
+    ? claudemdAgentId : agentsWithDir[0].id;
+  sel.value = id;
+  loadClaudemd(id);
+}
+
+async function loadClaudemd(agentId) {
+  if (!agentId) return;
+  claudemdAgentId  = agentId;
+  claudemdEditMode = false;
+
+  const agent = agents.find(a => a.id === agentId);
+  const workdirEl = document.getElementById('claudemd-workdir');
+  if (workdirEl) workdirEl.textContent = agent?.workDir || '';
+
+  const preview = document.getElementById('claudemd-preview');
+  const editor  = document.getElementById('claudemd-editor');
+  const noAgent = document.getElementById('claudemd-no-agent');
+  const btnMode = document.getElementById('btn-claudemd-mode');
+  const btnSave = document.getElementById('btn-claudemd-save');
+
+  try {
+    const r    = await fetch(`/api/claudemd?agentId=${encodeURIComponent(agentId)}`);
+    const data = await r.json();
+    noAgent.classList.add('hidden');
+    editor.value = data.content || '';
+    preview.innerHTML = data.content
+      ? marked.parse(data.content)
+      : '<div class="empty-state" style="padding:32px 0">Noch keine CLAUDE.md vorhanden — klicke auf „Bearbeiten" um eine zu erstellen.</div>';
+    preview.classList.remove('hidden');
+    editor.classList.add('hidden');
+    btnMode.textContent = 'Bearbeiten';
+    btnSave.classList.add('hidden');
+    document.getElementById('claudemd-save-msg').textContent = '';
+  } catch {
+    preview.innerHTML = '<div class="empty-state">Fehler beim Laden</div>';
+  }
+}
+
+function toggleClaudemdEdit() {
+  claudemdEditMode = !claudemdEditMode;
+  const preview = document.getElementById('claudemd-preview');
+  const editor  = document.getElementById('claudemd-editor');
+  const btnMode = document.getElementById('btn-claudemd-mode');
+  const btnSave = document.getElementById('btn-claudemd-save');
+
+  if (claudemdEditMode) {
+    preview.classList.add('hidden');
+    editor.classList.remove('hidden');
+    editor.focus();
+    btnMode.textContent = 'Vorschau';
+    btnSave.classList.remove('hidden');
+  } else {
+    const val = editor.value;
+    preview.innerHTML = val
+      ? marked.parse(val)
+      : '<div class="empty-state" style="padding:32px 0">Noch keine CLAUDE.md vorhanden.</div>';
+    preview.classList.remove('hidden');
+    editor.classList.add('hidden');
+    btnMode.textContent = 'Bearbeiten';
+  }
+}
+
+async function saveClaudemd() {
+  if (!claudemdAgentId) return;
+  const content = document.getElementById('claudemd-editor').value;
+  const msgEl   = document.getElementById('claudemd-save-msg');
+  try {
+    const r = await fetch(`/api/claudemd?agentId=${encodeURIComponent(claudemdAgentId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (r.ok) {
+      msgEl.style.color = 'var(--green)';
+      msgEl.textContent = '✓ Gespeichert';
+      setTimeout(() => { msgEl.textContent = ''; }, 2500);
+    } else {
+      const data = await r.json();
+      msgEl.style.color = 'var(--red)';
+      msgEl.textContent = data.error || 'Fehler beim Speichern';
+    }
+  } catch {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Netzwerkfehler';
+  }
+}
+
+// ── Slash Commands ──────────────────────────────────────────────────────────
+async function loadCommands() {
+  try {
+    const r = await fetch('/api/commands');
+    commands = await r.json();
+    renderCommandCards();
+  } catch {}
+}
+
+function renderCommandCards() {
+  const grid  = document.getElementById('commands-grid');
+  const count = document.getElementById('commands-count');
+  if (!grid) return;
+  if (count) count.textContent = commands.length + ' Commands';
+  if (!commands.length) {
+    grid.innerHTML = '<div class="empty-state">Keine Slash Commands gefunden (~/.claude/commands/)</div>';
+    return;
+  }
+  grid.innerHTML = commands.map(c => `
+    <div class="skill-card" onclick="openCommand('${esc(c.id)}')">
+      <div class="skill-card-accent" style="background:var(--mauve)"></div>
+      <div class="skill-card-name">${esc(c.name)}</div>
+      <div class="skill-card-desc" style="color:var(--overlay0);font-size:11px">${esc(c.scope)}</div>
+    </div>
+  `).join('');
+}
+
+function openCommand(id) {
+  const cmd = commands.find(c => c.id === id);
+  if (!cmd) return;
+  currentCommandId  = id;
+  currentCommandDir = cmd.dir;
+  commandEditMode   = false;
+
+  document.getElementById('skills-list-section').classList.add('hidden');
+  document.getElementById('commands-list-section').classList.add('hidden');
+  document.getElementById('skill-detail-section').classList.remove('hidden');
+  document.getElementById('skill-detail-name').textContent = cmd.name;
+  document.getElementById('skill-detail-editor').value = cmd.content;
+  document.getElementById('skill-detail-preview').innerHTML = marked.parse(cmd.content);
+  document.getElementById('skill-detail-preview').classList.remove('hidden');
+  document.getElementById('skill-detail-editor').classList.add('hidden');
+  document.getElementById('btn-skill-mode').textContent = 'Bearbeiten';
+  document.getElementById('btn-skill-save').classList.add('hidden');
+  document.getElementById('skill-save-msg').textContent = '';
+}
+
+function toggleCommandEdit() {
+  commandEditMode = !commandEditMode;
+  const preview = document.getElementById('skill-detail-preview');
+  const editor  = document.getElementById('skill-detail-editor');
+  const btnMode = document.getElementById('btn-skill-mode');
+  const btnSave = document.getElementById('btn-skill-save');
+  if (commandEditMode) {
+    preview.classList.add('hidden');
+    editor.classList.remove('hidden');
+    editor.focus();
+    btnMode.textContent = 'Vorschau';
+    btnSave.classList.remove('hidden');
+  } else {
+    preview.innerHTML = marked.parse(editor.value);
+    preview.classList.remove('hidden');
+    editor.classList.add('hidden');
+    btnMode.textContent = 'Bearbeiten';
+  }
+}
+
+async function saveCommand() {
+  if (!currentCommandId) return;
+  const content = document.getElementById('skill-detail-editor').value;
+  const msgEl   = document.getElementById('skill-save-msg');
+  try {
+    const r = await fetch(`/api/commands/${currentCommandId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, dir: currentCommandDir }),
+    });
+    if (r.ok) {
+      const cmd = commands.find(c => c.id === currentCommandId);
+      if (cmd) cmd.content = content;
+      msgEl.style.color = 'var(--green)';
+      msgEl.textContent = '✓ Gespeichert';
+      setTimeout(() => { msgEl.textContent = ''; }, 2500);
+    } else {
+      msgEl.style.color = 'var(--red)';
+      msgEl.textContent = 'Fehler beim Speichern';
+    }
+  } catch {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Netzwerkfehler';
+  }
+}
+
+function openNewCommandForm() {
+  document.getElementById('new-command-form').classList.remove('hidden');
+  document.getElementById('new-command-id').focus();
+}
+
+function closeNewCommandForm() {
+  document.getElementById('new-command-form').classList.add('hidden');
+  document.getElementById('new-command-msg').textContent = '';
+}
+
+async function createCommand() {
+  const id  = document.getElementById('new-command-id').value.trim().toLowerCase().replace(/\s+/g, '-');
+  const msg = document.getElementById('new-command-msg');
+  if (!id) { msg.textContent = 'ID erforderlich'; return; }
+  try {
+    const r = await fetch('/api/commands', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const data = await r.json();
+    if (!r.ok) { msg.textContent = data.error || 'Fehler'; return; }
+    closeNewCommandForm();
+    await loadCommands();
+    openCommand(data.id);
+  } catch { msg.textContent = 'Netzwerkfehler'; }
 }

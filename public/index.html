@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AgenticOS</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 </head>
 <body>
 <div id="app">
@@ -32,7 +33,7 @@
       </div>
       <div class="topbar-sep"></div>
       <button id="btn-new-task" class="btn-primary" onclick="focusTaskInput()">+ Neuer Task</button>
-      <button id="btn-config" class="icon-btn" title="Einstellungen" onclick="openConfig()">⚙</button>
+      <button id="btn-config" class="icon-btn" title="Einstellungen" onclick="openConfig()"><i data-lucide="settings"></i></button>
     </div>
   </header>
 
@@ -50,16 +51,25 @@
       <div class="sidebar-section">
         <div class="sidebar-label">NAVIGATION</div>
         <a class="nav-link active" data-view="dashboard" onclick="setView('dashboard')">
-          <span>📊</span> Dashboard
+          <i data-lucide="layout-dashboard"></i> Dashboard
         </a>
         <a class="nav-link" data-view="projects" onclick="setView('projects')">
-          <span>📁</span> Projekte
+          <i data-lucide="folder"></i> Projekte
         </a>
         <a class="nav-link" data-view="todos" onclick="setView('todos')">
-          <span>✅</span> Todos
+          <i data-lucide="check-square"></i> Todos
         </a>
         <a class="nav-link" data-view="log" onclick="setView('log')">
-          <span>📋</span> Agent Log
+          <i data-lucide="scroll-text"></i> Agent Log
+        </a>
+        <a class="nav-link" data-view="skills" onclick="setView('skills')">
+          <i data-lucide="puzzle"></i> Skills
+        </a>
+        <a class="nav-link" data-view="claudemd" onclick="setView('claudemd')">
+          <i data-lucide="file-code"></i> CLAUDE.md
+        </a>
+        <a class="nav-link" data-view="plugins" onclick="setView('plugins')">
+          <i data-lucide="blocks"></i> Plugins
         </a>
       </div>
     </aside>
@@ -85,6 +95,12 @@
           <div class="content-section-header">
             <span class="section-label">TODOS · KANBAN</span>
             <span id="todos-count" class="badge-count"></span>
+            <label class="kanban-filter-label">
+              <i data-lucide="filter"></i>
+              <select id="kanban-filter" class="kanban-filter-select" onchange="renderKanban(this.value)">
+                <option value="">Alle Projekte</option>
+              </select>
+            </label>
           </div>
           <div id="kanban-board" class="kanban-board">
             <div class="kanban-col">
@@ -123,10 +139,147 @@
       <div id="view-todos" class="view hidden">
         <section class="content-section">
           <div class="content-section-header">
-            <span class="section-label">ALLE TODOS</span>
-            <button class="text-btn" onclick="loadTodos()">↺ Aktualisieren</button>
+            <span class="section-label">TODOS</span>
+            <label class="kanban-filter-label">
+              <i data-lucide="filter"></i>
+              <select id="todos-filter" class="kanban-filter-select" onchange="onTodosFilter(this.value)">
+                <option value="">Alle Projekte</option>
+              </select>
+            </label>
+            <label id="project-status-label" class="kanban-filter-label hidden">
+              <i data-lucide="tag"></i>
+              <select id="project-status-select" class="kanban-filter-select" onchange="updateProjectStatus(this.value)">
+                <option value="active">Aktiv</option>
+                <option value="planning">Geplant</option>
+                <option value="paused">Pausiert</option>
+                <option value="completed">Abgeschlossen</option>
+                <option value="cancelled">Abgebrochen</option>
+              </select>
+            </label>
+            <button id="todos-new-btn" class="btn-secondary" onclick="openNewTodoModal()">+ Todo</button>
+            <div class="view-toggle-btns">
+              <button id="todos-view-list" class="view-toggle-btn active" title="Listenansicht" onclick="setTodosView('list')"><i data-lucide="list"></i></button>
+              <button id="todos-view-kanban" class="view-toggle-btn" title="Kanban-Ansicht" onclick="setTodosView('kanban')"><i data-lucide="columns-3"></i></button>
+            </div>
+            <button class="text-btn" onclick="loadTodos()">↺</button>
+          </div>
+          <div id="todos-kanban-board" class="kanban-board hidden">
+            <div class="kanban-col"><div class="kanban-col-header col-open">Offen <span class="col-count" id="tcount-open">0</span></div><div class="kanban-cards" id="tcards-open"></div></div>
+            <div class="kanban-col"><div class="kanban-col-header col-inprogress">In Arbeit <span class="col-count" id="tcount-inprogress">0</span></div><div class="kanban-cards" id="tcards-inprogress"></div></div>
+            <div class="kanban-col"><div class="kanban-col-header col-done">Erledigt <span class="col-count" id="tcount-done">0</span></div><div class="kanban-cards" id="tcards-done"></div></div>
           </div>
           <div id="all-todos-list"></div>
+        </section>
+      </div>
+
+      <!-- Skills view -->
+      <div id="view-skills" class="view hidden">
+
+        <!-- Skills list -->
+        <section class="content-section" id="skills-list-section">
+          <div class="content-section-header">
+            <span class="section-label">SKILLS</span>
+            <span id="skills-count" class="badge-count"></span>
+            <button class="text-btn" onclick="openNewSkillForm()" style="margin-left:auto">+ Neu</button>
+          </div>
+          <div id="new-skill-form" class="hidden" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:11px;color:var(--overlay0)">ID (Ordnername)</label>
+              <input id="new-skill-id" class="config-input" style="width:160px" placeholder="mein-skill">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:11px;color:var(--overlay0)">Name</label>
+              <input id="new-skill-name" class="config-input" style="width:180px" placeholder="Mein Skill">
+            </div>
+            <button class="btn-primary" onclick="createSkill()">Erstellen</button>
+            <button class="btn-secondary" onclick="closeNewSkillForm()">Abbrechen</button>
+            <span id="new-skill-msg" style="font-size:12px;color:var(--red)"></span>
+          </div>
+          <div id="skills-grid" class="skills-grid"></div>
+        </section>
+
+        <!-- Slash Commands list -->
+        <section class="content-section" id="commands-list-section">
+          <div class="section-divider" style="margin:0 0 20px"></div>
+          <div class="content-section-header">
+            <span class="section-label">SLASH COMMANDS</span>
+            <span id="commands-count" class="badge-count"></span>
+            <button class="text-btn" onclick="openNewCommandForm()" style="margin-left:auto">+ Neu</button>
+          </div>
+          <div id="new-command-form" class="hidden" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:11px;color:var(--overlay0)">ID (Dateiname ohne .md)</label>
+              <input id="new-command-id" class="config-input" style="width:200px" placeholder="mein-command">
+            </div>
+            <button class="btn-primary" onclick="createCommand()">Erstellen</button>
+            <button class="btn-secondary" onclick="closeNewCommandForm()">Abbrechen</button>
+            <span id="new-command-msg" style="font-size:12px;color:var(--red)"></span>
+          </div>
+          <div id="commands-grid" class="skills-grid"></div>
+        </section>
+
+        <!-- Skill detail -->
+        <section class="content-section hidden" id="skill-detail-section">
+          <div class="skill-detail-header">
+            <button class="icon-btn skill-back-btn" onclick="closeSkillDetail()">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="10,3 5,8 10,13"/>
+              </svg>
+              Zurück
+            </button>
+            <span id="skill-detail-name" class="skill-detail-title"></span>
+            <div style="display:flex;gap:8px;margin-left:auto;align-items:center">
+              <span id="skill-save-msg" style="font-size:12px;color:var(--green)"></span>
+              <button id="btn-skill-mode" class="btn-secondary" onclick="skillDetailToggleEdit()">Bearbeiten</button>
+              <button id="btn-skill-save" class="btn-primary hidden" onclick="skillDetailSave()">Speichern</button>
+            </div>
+          </div>
+          <div id="skill-detail-preview" class="markdown-body skill-preview"></div>
+          <textarea id="skill-detail-editor" class="skill-editor hidden" spellcheck="false"></textarea>
+        </section>
+
+      </div>
+
+      <!-- CLAUDE.md view -->
+      <div id="view-claudemd" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">CLAUDE.MD</span>
+            <select id="claudemd-agent-select" class="kanban-filter-select" onchange="loadClaudemd(this.value)" style="margin-left:8px"></select>
+            <span id="claudemd-workdir" style="font-size:11px;color:var(--overlay0);margin-left:8px;font-family:monospace"></span>
+            <div style="display:flex;gap:8px;margin-left:auto;align-items:center">
+              <span id="claudemd-save-msg" style="font-size:12px;color:var(--green)"></span>
+              <button id="btn-claudemd-mode" class="btn-secondary" onclick="toggleClaudemdEdit()">Bearbeiten</button>
+              <button id="btn-claudemd-save" class="btn-primary hidden" onclick="saveClaudemd()">Speichern</button>
+            </div>
+          </div>
+          <div id="claudemd-no-agent" class="empty-state hidden">Kein Agent mit Arbeitsverzeichnis konfiguriert.</div>
+          <div id="claudemd-preview" class="markdown-body skill-preview"></div>
+          <textarea id="claudemd-editor" class="skill-editor hidden" spellcheck="false"></textarea>
+        </section>
+      </div>
+
+      <!-- Plugins view -->
+      <div id="view-plugins" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">PLUGINS</span>
+            <span id="plugins-installed-count" class="badge-count"></span>
+            <span id="plugins-available-count" class="badge-count" style="background:rgba(137,180,250,0.1);color:var(--blue)"></span>
+            <div class="plugin-search-wrap">
+              <input id="plugin-search" class="config-input" placeholder="Plugin suchen…" oninput="filterPlugins(this.value)" style="width:200px;padding:5px 10px">
+            </div>
+            <button class="text-btn" onclick="loadPlugins()">↺</button>
+          </div>
+
+          <div id="plugins-installed-section" class="hidden">
+            <div class="plugins-section-title">Installiert</div>
+            <div id="plugins-installed-grid" class="plugins-grid" style="margin-bottom:24px"></div>
+          </div>
+
+          <div id="plugins-available-title" class="plugins-section-title">Verfügbar im Marketplace</div>
+          <div id="plugins-loading" style="padding:40px;text-align:center;color:var(--overlay0);font-size:13px">Lade Plugins…</div>
+          <div id="plugins-grid" class="plugins-grid"></div>
         </section>
       </div>
 
@@ -198,6 +351,54 @@
   </div>
 </div>
 
+<!-- ── New Todo modal ───────────────────────────────────────────────────────── -->
+<div id="todo-overlay" class="overlay hidden">
+  <div class="modal" style="width:420px">
+    <div class="modal-header">
+      <span class="modal-title">Neues Todo</span>
+      <button class="modal-close" onclick="closeNewTodoModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="cfg-tab-panel">
+        <div class="config-field">
+          <label>Titel</label>
+          <input id="todo-title" class="config-input" type="text" placeholder="Was soll erledigt werden?" autocomplete="off">
+        </div>
+        <div class="config-field">
+          <label>Projekt</label>
+          <select id="todo-project" class="config-input" onchange="onTodoProjectChange(this.value)"></select>
+        </div>
+        <div style="display:flex;gap:12px">
+          <div class="config-field" style="flex:1">
+            <label>Priorität</label>
+            <select id="todo-priority" class="config-input">
+              <option value="high">Hoch</option>
+              <option value="medium" selected>Mittel</option>
+              <option value="low">Niedrig</option>
+            </select>
+          </div>
+          <div class="config-field" style="flex:1">
+            <label>Scope</label>
+            <select id="todo-scope" class="config-input">
+              <option value="privat" selected>Privat</option>
+              <option value="beruflich">Beruflich</option>
+            </select>
+          </div>
+        </div>
+        <div class="config-field">
+          <label>Tags <span style="font-weight:400;color:var(--overlay0)">(kommagetrennt, optional)</span></label>
+          <input id="todo-tags" class="config-input" type="text" placeholder="z.B. heimwerken, balkon">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+          <button class="btn-secondary" onclick="closeNewTodoModal()">Abbrechen</button>
+          <button class="btn-primary" onclick="submitNewTodo()">Erstellen</button>
+        </div>
+        <div id="todo-modal-err" style="font-size:12px;color:var(--red);display:none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── Config modal ─────────────────────────────────────────────────────────── -->
 <div id="config-overlay" class="overlay hidden">
   <div class="modal">
@@ -244,6 +445,30 @@
   </div>
 </div>
 
+<!-- ── Plugin progress overlay ───────────────────────────────────────────────── -->
+<div id="plugin-progress-overlay" class="overlay hidden">
+  <div class="modal" style="width:540px">
+    <div class="modal-header">
+      <span id="plugin-progress-title" class="modal-title"></span>
+      <button class="icon-btn" onclick="closePluginProgress(false)">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <div id="plugin-progress-output"
+           style="font-family:'JetBrains Mono','Fira Code',ui-monospace,monospace;font-size:12px;
+                  padding:16px;background:var(--crust);min-height:120px;max-height:300px;
+                  overflow-y:auto;white-space:pre-wrap;color:var(--text);line-height:1.6"></div>
+    </div>
+    <div style="padding:12px 20px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--surface0)">
+      <span id="plugin-progress-status" style="font-size:12px;color:var(--overlay0)">Läuft…</span>
+      <button id="plugin-progress-close-btn" class="btn-secondary hidden" onclick="closePluginProgress(true)">Schließen &amp; Aktualisieren</button>
+    </div>
+  </div>
+</div>
+
+<script src="/lib/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="/lib/sortable.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

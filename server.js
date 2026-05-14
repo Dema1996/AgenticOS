@@ -2,6 +2,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
 const matter = require('gray-matter');
 
@@ -32,12 +33,16 @@ try { taskHistory = JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8')); }
 catch { taskHistory = []; }
 
 function saveTasks() {
-  try { fs.writeFileSync(HISTORY_PATH, JSON.stringify(taskHistory.slice(0, 500), null, 2)); }
+  try { fs.writeFileSync(HISTORY_PATH, JSON.stringify(taskHistory.slice(0, 200), null, 2)); }
   catch {}
 }
 
 // ── Static ────────────────────────────────────────────────────────────────────
 app.use(express.static(path.join(ROOT, 'public')));
+app.get('/lib/marked.min.js', (_req, res) =>
+  res.sendFile(path.join(ROOT, 'node_modules/marked/marked.min.js')));
+app.get('/lib/sortable.min.js', (_req, res) =>
+  res.sendFile(path.join(ROOT, 'node_modules/sortablejs/Sortable.min.js')));
 
 // ── Config ────────────────────────────────────────────────────────────────────
 app.get('/api/config', (_req, res) => res.json(readConfig()));
@@ -92,6 +97,7 @@ app.post('/api/agents/:id/task', (req, res) => {
     proc = spawn(agent.command, cmdArgs, {
       cwd: agent.workDir || ROOT,
       env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (err) {
     return res.status(500).json({ error: `Spawn fehlgeschlagen: ${err.message}` });
@@ -136,6 +142,7 @@ app.post('/api/agents/:id/task', (req, res) => {
     entry.status = code === 0 ? 'done' : 'error';
     entry.exitCode = code;
     entry.completedAt = new Date().toISOString();
+    entry.lines = state.lines.slice(0, 500);
     saveTasks();
     for (const c of state.sseClients) {
       c.write(`data: ${JSON.stringify({ type: 'done', done: true })}\n\n`);
@@ -187,7 +194,16 @@ app.get('/api/tasks', (req, res) => {
   let tasks = taskHistory;
   if (agentId) tasks = tasks.filter(t => t.agentId === agentId);
   if (status)  tasks = tasks.filter(t => t.status === status);
-  res.json(tasks.slice(0, parseInt(limit, 10)));
+  res.json(tasks.slice(0, parseInt(limit, 10)).map(({ lines, ...t }) => t));
+});
+
+app.get('/api/tasks/:id', (req, res) => {
+  const task = taskHistory.find(t => t.id === req.params.id);
+  if (!task) return res.status(404).json({ error: 'Task nicht gefunden' });
+  // Prefer live lines from taskMap (running task), fall back to persisted lines
+  const live = taskMap.get(task.id);
+  const lines = live ? live.lines : (task.lines || []);
+  res.json({ ...task, lines, running: !!(live && !live.done) });
 });
 
 // ── Projects (dual storage) ───────────────────────────────────────────────────
@@ -218,6 +234,26 @@ app.get('/api/projects', (_req, res) => {
   catch { res.json([]); }
 });
 
+// ── Project status update ─────────────────────────────────────────────────────
+app.patch('/api/projects/:id', (req, res) => {
+  const { vaultPath } = readConfig();
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: 'status required' });
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  try {
+    const filePath = safePath(path.join(vaultPath, 'projects'), `${id}.md`);
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = matter(raw);
+    parsed.data.status = status;
+    parsed.data.updated = new Date().toISOString().split('T')[0];
+    fs.writeFileSync(filePath, matter.stringify(parsed.content, parsed.data));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Todos (dual storage) ──────────────────────────────────────────────────────
 app.get('/api/todos', (_req, res) => {
   const { vaultPath } = readConfig();
@@ -225,13 +261,36 @@ app.get('/api/todos', (_req, res) => {
     const dir = path.join(vaultPath, 'todos');
     try {
       const todos = [];
-      for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.md'))) {
-        const { data, content } = matter(fs.readFileSync(path.join(dir, f), 'utf8'));
-        for (const line of content.split('\n')) {
-          const open = line.match(/^- \[ \] (.+)/);
-          const done = line.match(/^- \[x\] (.+)/i);
-          if (open) todos.push({ file: f, text: open[1], status: 'open', project: data.project || null });
-          else if (done) todos.push({ file: f, text: done[1], status: 'done', project: data.project || null });
+      for (const entry of fs.readdirSync(dir)) {
+        const entryPath = path.join(dir, entry);
+        const stat = fs.statSync(entryPath);
+
+        if (stat.isDirectory()) {
+          // Project todos: todos/{project-id}/*.md — each file is one todo via frontmatter
+          for (const f of fs.readdirSync(entryPath).filter(f => f.endsWith('.md'))) {
+            try {
+              const { data } = matter(fs.readFileSync(path.join(entryPath, f), 'utf8'));
+              if (!data.title) continue;
+              todos.push({
+                file: `${entry}/${f}`,
+                text: data.title,
+                status: data.status || 'open',
+                priority: data.priority || null,
+                project: entry,
+                scope: data.scope || null,
+                tags: data.tags || [],
+              });
+            } catch {}
+          }
+        } else if (entry.endsWith('.md')) {
+          // Flat files (inbox.md, etc.) — parse markdown checkboxes
+          const { content } = matter(fs.readFileSync(entryPath, 'utf8'));
+          for (const line of content.split('\n')) {
+            const open = line.match(/^- \[ \] (.+)/);
+            const done = line.match(/^- \[x\] (.+)/i);
+            if (open) todos.push({ file: entry, text: open[1], status: 'open', project: null });
+            else if (done) todos.push({ file: entry, text: done[1], status: 'done', project: null });
+          }
         }
       }
       return res.json(todos);
@@ -242,22 +301,344 @@ app.get('/api/todos', (_req, res) => {
 });
 
 // ── Toggle todo ───────────────────────────────────────────────────────────────
-app.patch('/api/todos', (req, res) => {
+app.post('/api/todos', (req, res) => {
   const { vaultPath } = readConfig();
-  const { file, text, status } = req.body;
-  if (!vaultPath) return res.status(501).json({ error: 'Eigener Speicher: Todo-Updates noch nicht unterstützt' });
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  const { title, project, priority = 'medium', scope = 'privat', tags = [] } = req.body;
+  if (!title?.trim()) return res.status(400).json({ error: 'Titel fehlt' });
   try {
-    const fullPath = safePath(path.join(vaultPath, 'todos'), file);
-    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let raw = fs.readFileSync(fullPath, 'utf8');
-    raw = status === 'done'
-      ? raw.replace(new RegExp(`^(- )\\[ \\] (${escaped})`, 'm'), '$1[x] $2')
-      : raw.replace(new RegExp(`^(- )\\[x\\] (${escaped})`, 'im'), '$1[ ] $2');
-    fs.writeFileSync(fullPath, raw);
+    const todosDir = path.join(vaultPath, 'todos');
+    const today = new Date().toISOString().split('T')[0];
+    if (!project || project === '__inbox__') {
+      // Append checkbox to inbox.md
+      const inboxPath = path.join(todosDir, 'inbox.md');
+      let inbox = '';
+      try { inbox = fs.readFileSync(inboxPath, 'utf8'); } catch {}
+      inbox = inbox.trimEnd() + `\n- [ ] ${title.trim()}\n`;
+      fs.writeFileSync(inboxPath, inbox);
+    } else {
+      const slug = title.trim().toLowerCase()
+        .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss')
+        .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'todo';
+      const dir = safePath(todosDir, project);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      // Avoid overwriting existing file
+      let filename = `${slug}.md`;
+      let i = 2;
+      while (fs.existsSync(path.join(dir, filename))) filename = `${slug}-${i++}.md`;
+      const tagList = typeof tags === 'string'
+        ? tags.split(',').map(t => t.trim()).filter(Boolean)
+        : tags;
+      fs.writeFileSync(path.join(dir, filename), matter.stringify('', {
+        title: title.trim(), type: 'todo', scope,
+        status: 'open', priority,
+        project: `[[projects/${project}]]`,
+        created: today, updated: today,
+        tags: tagList,
+      }));
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+app.patch('/api/todos', (req, res) => {
+  const { vaultPath } = readConfig();
+  const { file, text, status, newProject } = req.body;
+  if (!vaultPath) return res.status(501).json({ error: 'Eigener Speicher: Todo-Updates noch nicht unterstützt' });
+  try {
+    const todosDir = path.join(vaultPath, 'todos');
+    const fullPath = safePath(todosDir, file);
+    const today = new Date().toISOString().split('T')[0];
+
+    if (newProject !== undefined) {
+      // ── Project reassignment ──────────────────────────────────────────────
+      if (file.includes('/')) {
+        // Source: frontmatter project todo
+        const raw = fs.readFileSync(fullPath, 'utf8');
+        const parsed = matter(raw);
+        const title = parsed.data.title || text;
+        if (!newProject || newProject === '__inbox__') {
+          // Move to inbox.md as checkbox
+          const inboxPath = path.join(todosDir, 'inbox.md');
+          let inbox = '';
+          try { inbox = fs.readFileSync(inboxPath, 'utf8'); } catch {}
+          inbox = inbox.trimEnd() + `\n- [ ] ${title}\n`;
+          fs.writeFileSync(inboxPath, inbox);
+          fs.unlinkSync(fullPath);
+        } else {
+          // Move to different project folder
+          const newDir = safePath(todosDir, newProject);
+          if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
+          parsed.data.project = `[[projects/${newProject}]]`;
+          parsed.data.updated = today;
+          const newFilePath = path.join(newDir, path.basename(file));
+          fs.writeFileSync(newFilePath, matter.stringify(parsed.content, parsed.data));
+          if (newFilePath !== fullPath) fs.unlinkSync(fullPath);
+        }
+      } else {
+        // Source: inbox checkbox todo
+        if (newProject && newProject !== '__inbox__') {
+          const slug = text.toLowerCase()
+            .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss')
+            .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'todo';
+          const newDir = safePath(todosDir, newProject);
+          if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
+          const newFilePath = path.join(newDir, `${slug}.md`);
+          fs.writeFileSync(newFilePath, matter.stringify('', {
+            title: text, type: 'todo', scope: 'privat',
+            status: status || 'open', priority: 'medium',
+            project: `[[projects/${newProject}]]`,
+            created: today, updated: today, tags: [],
+          }));
+          // Remove checkbox from inbox
+          const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          let raw = fs.readFileSync(fullPath, 'utf8');
+          raw = raw.replace(new RegExp(`^- \\[[ x]\\] ${escaped}\\r?\\n?`, 'm'), '');
+          fs.writeFileSync(fullPath, raw);
+        }
+      }
+      return res.json({ ok: true });
+    }
+
+    // ── Status update (existing logic) ────────────────────────────────────
+    if (file.includes('/')) {
+      const raw = fs.readFileSync(fullPath, 'utf8');
+      const parsed = matter(raw);
+      parsed.data.status = status;
+      parsed.data.updated = today;
+      fs.writeFileSync(fullPath, matter.stringify(parsed.content, parsed.data));
+    } else {
+      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let raw = fs.readFileSync(fullPath, 'utf8');
+      raw = status === 'done'
+        ? raw.replace(new RegExp(`^(- )\\[ \\] (${escaped})`, 'm'), '$1[x] $2')
+        : raw.replace(new RegExp(`^(- )\\[x\\] (${escaped})`, 'im'), '$1[ ] $2');
+      fs.writeFileSync(fullPath, raw);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+app.get('/api/skills', (_req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.json([]);
+  const dir = path.join(vaultPath, '.claude', 'skills');
+  try {
+    const skills = fs.readdirSync(dir)
+      .filter(f => {
+        try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; }
+      })
+      .map(id => {
+        try {
+          const raw = fs.readFileSync(path.join(dir, id, 'SKILL.md'), 'utf8');
+          const { data } = matter(raw);
+          return { id, name: data.name || id, description: data.description || '', content: raw };
+        } catch {
+          return { id, name: id, description: '', content: '' };
+        }
+      });
+    res.json(skills);
+  } catch { res.json([]); }
+});
+
+app.get('/api/skills/:id', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.status(404).json({ error: 'Kein Vault konfiguriert' });
+  try {
+    const p = safePath(path.join(vaultPath, '.claude', 'skills'), path.join(req.params.id, 'SKILL.md'));
+    res.json({ id: req.params.id, content: fs.readFileSync(p, 'utf8') });
+  } catch { res.status(404).json({ error: 'Skill nicht gefunden' }); }
+});
+
+app.put('/api/skills/:id', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  if (!req.body.content) return res.status(400).json({ error: 'content required' });
+  try {
+    const p = safePath(path.join(vaultPath, '.claude', 'skills'), path.join(req.params.id, 'SKILL.md'));
+    fs.writeFileSync(p, req.body.content, 'utf8');
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/skills', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  const { id, name, description } = req.body;
+  if (!id || !name) return res.status(400).json({ error: 'id und name erforderlich' });
+  try {
+    const dir = path.join(vaultPath, '.claude', 'skills', id);
+    if (fs.existsSync(dir)) return res.status(409).json({ error: 'Skill existiert bereits' });
+    fs.mkdirSync(dir, { recursive: true });
+    const content = `---\nname: ${name}\ndescription: ${description || ''}\n---\n\n# ${name}\n\n`;
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), content, 'utf8');
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── CLAUDE.md (per agent workDir) ─────────────────────────────────────────────
+app.get('/api/claudemd', (req, res) => {
+  const { agentId } = req.query;
+  const { agents = [] } = readConfig();
+  const agent = agents.find(a => a.id === agentId);
+  if (!agent?.workDir) return res.status(404).json({ error: 'Agent oder Arbeitsverzeichnis nicht gefunden' });
+  const filePath = path.join(agent.workDir, 'CLAUDE.md');
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    res.json({ content, exists: true, agentId, workDir: agent.workDir });
+  } catch {
+    res.json({ content: '', exists: false, agentId, workDir: agent.workDir });
+  }
+});
+
+app.put('/api/claudemd', (req, res) => {
+  const { agentId } = req.query;
+  const { agents = [] } = readConfig();
+  const agent = agents.find(a => a.id === agentId);
+  if (!agent?.workDir) return res.status(404).json({ error: 'Agent oder Arbeitsverzeichnis nicht gefunden' });
+  if (req.body.content === undefined) return res.status(400).json({ error: 'content required' });
+  try {
+    const filePath = safePath(agent.workDir, 'CLAUDE.md');
+    fs.writeFileSync(filePath, req.body.content, 'utf8');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Plugins ───────────────────────────────────────────────────────────────────
+app.get('/api/plugins', (_req, res) => {
+  const proc = spawn('claude', ['plugin', 'list', '--json', '--available'], {
+    env: process.env,
+  });
+  let out = '';
+  proc.stdout.on('data', d => { out += d.toString(); });
+  proc.on('close', () => {
+    try { res.json(JSON.parse(out)); }
+    catch { res.json({ installed: [], available: [] }); }
+  });
+  proc.on('error', () => res.json({ installed: [], available: [] }));
+});
+
+function spawnPluginTask(args, res) {
+  const taskId = `plugin-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+  let proc;
+  try {
+    proc = spawn('claude', args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+
+  const state = { proc, lines: [], done: false, sseClients: new Set(), entry: { id: taskId } };
+  taskMap.set(taskId, state);
+
+  const emit = (text, type) => {
+    const line = { text, type, ts: Date.now() };
+    state.lines.push(line);
+    const msg = `data: ${JSON.stringify({ ...line, done: false })}\n\n`;
+    for (const c of state.sseClients) c.write(msg);
+  };
+  proc.stdout.on('data', d => emit(d.toString(), 'stdout'));
+  proc.stderr.on('data', d => emit(d.toString(), 'stderr'));
+  proc.on('error', err => {
+    emit(`Fehler: ${err.message}\n`, 'stderr');
+    state.done = true;
+    for (const c of state.sseClients) { c.write(`data: ${JSON.stringify({ type: 'done', done: true, exitCode: 1 })}\n\n`); c.end(); }
+    state.sseClients.clear();
+  });
+  proc.on('close', code => {
+    state.done = true;
+    for (const c of state.sseClients) { c.write(`data: ${JSON.stringify({ type: 'done', done: true, exitCode: code })}\n\n`); c.end(); }
+    state.sseClients.clear();
+  });
+  res.json({ taskId });
+}
+
+app.post('/api/plugins/install', (req, res) => {
+  const { pluginId } = req.body;
+  if (!pluginId) return res.status(400).json({ error: 'pluginId required' });
+  spawnPluginTask(['plugin', 'install', pluginId], res);
+});
+
+app.post('/api/plugins/uninstall', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  spawnPluginTask(['plugin', 'uninstall', name, '-y'], res);
+});
+
+// ── Slash Commands ────────────────────────────────────────────────────────────
+const USER_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
+
+function readCommandDirs() {
+  const { vaultPath } = readConfig();
+  const dirs = [{ dir: USER_COMMANDS_DIR, scope: 'global' }];
+  if (vaultPath) dirs.push({ dir: path.join(vaultPath, '.claude', 'commands'), scope: 'vault' });
+  return dirs;
+}
+
+app.get('/api/commands', (_req, res) => {
+  const commands = [];
+  for (const { dir, scope } of readCommandDirs()) {
+    try {
+      for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.md'))) {
+        try {
+          const content = fs.readFileSync(path.join(dir, f), 'utf8');
+          const id = f.replace(/\.md$/, '');
+          commands.push({ id, name: `/${id}`, scope, content, dir });
+        } catch {}
+      }
+    } catch {}
+  }
+  res.json(commands);
+});
+
+app.get('/api/commands/:id', (req, res) => {
+  for (const { dir } of readCommandDirs()) {
+    try {
+      const p = safePath(dir, `${req.params.id}.md`);
+      const content = fs.readFileSync(p, 'utf8');
+      return res.json({ id: req.params.id, content, dir });
+    } catch {}
+  }
+  res.status(404).json({ error: 'Command nicht gefunden' });
+});
+
+app.put('/api/commands/:id', (req, res) => {
+  if (!req.body.content) return res.status(400).json({ error: 'content required' });
+  const { dir } = req.body;
+  const base = dir || USER_COMMANDS_DIR;
+  try {
+    if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
+    const p = safePath(base, `${req.params.id}.md`);
+    fs.writeFileSync(p, req.body.content, 'utf8');
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/commands', (req, res) => {
+  const { id, content = '' } = req.body;
+  if (!id) return res.status(400).json({ error: 'id erforderlich' });
+  const safeId = id.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  try {
+    if (!fs.existsSync(USER_COMMANDS_DIR)) fs.mkdirSync(USER_COMMANDS_DIR, { recursive: true });
+    const p = safePath(USER_COMMANDS_DIR, `${safeId}.md`);
+    if (fs.existsSync(p)) return res.status(409).json({ error: 'Command existiert bereits' });
+    fs.writeFileSync(p, content || `# /${safeId}\n\n`, 'utf8');
+    res.json({ ok: true, id: safeId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/commands/:id', (req, res) => {
+  const { dir } = req.query;
+  const base = dir || USER_COMMANDS_DIR;
+  try {
+    const p = safePath(base, `${req.params.id}.md`);
+    fs.unlinkSync(p);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Generic SSE stream (for exec tasks) ──────────────────────────────────────
