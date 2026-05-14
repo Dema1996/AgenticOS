@@ -14,6 +14,8 @@ npm run dev        # node --watch server.js
 
 Server runs on `http://localhost:4000` by default (configurable in `config.json`).
 
+> **Nach jeder Änderung an `server.js`:** Server neu starten (`kill <PID> && npm run dev`) und Änderungen nach GitHub pushen (`git push origin main`). Der laufende Prozess lädt geänderte Dateien nicht automatisch nach — außer bei `npm run dev` (`node --watch`), das den Server bei Dateiänderungen automatisch neu startet.
+
 ## Architecture
 
 **Single-file backend** (`server.js`, ~800 lines) — Express server with no build step. Config is read from disk on every request via `readConfig()`, so changes to `config.json` take effect without restart.
