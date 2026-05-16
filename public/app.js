@@ -948,11 +948,13 @@ function setView(view) {
   );
   const target = document.getElementById(`view-${view}`);
   if (target) target.classList.remove('hidden');
-  if (view === 'log') loadTaskHistory();
-  if (view === 'skills') loadSkills();
+  if (view === 'log')     loadTaskHistory();
+  if (view === 'skills')  loadSkills();
   if (view === 'plugins') loadPlugins();
   if (view === 'claudemd') loadClaudemdView();
-  if (view === 'trash') loadTrash();
+  if (view === 'trash')   loadTrash();
+  if (view === 'wiki')    initWikiView();
+  if (view === 'graph')   showGraphView();
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -2093,4 +2095,498 @@ async function executeSlashCommand() {
     setStatus(`Fehler: ${e.message}`);
     document.getElementById('btn-send').disabled = false;
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE 4 — WIKI / GRAPH / SEARCH
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const TYPE_COLORS = {
+  project:  '#89b4fa',
+  todo:     '#a6e3a1',
+  source:   '#fab387',
+  concept:  '#cba6f7',
+  entity:   '#f38ba8',
+  session:  '#94e2d5',
+  query:    '#f9e2af',
+  overview: '#74c7ec',
+};
+
+// ── State ────────────────────────────────────────────────────────────────────
+let _wikiReady       = false;
+let _wikiPendingPath = null;
+let _graphData       = null;
+let _graphSim        = null;
+let _searchTimer     = null;
+let _wikiSearchTimer = null;
+
+// ── Helper: open a wiki file from anywhere (search/graph/links) ───────────────
+function openWikiFile(path) {
+  _wikiPendingPath = path;
+  setView('wiki');
+}
+
+// ── Wiki: view init ──────────────────────────────────────────────────────────
+function initWikiView() {
+  const firstTime = !_wikiReady;
+  if (!_wikiReady) {
+    _wikiReady = true;
+    initWikiFileTree();
+    setupWikiSearch();
+  }
+  if (_wikiPendingPath) {
+    const p = _wikiPendingPath;
+    _wikiPendingPath = null;
+    loadAny(p);
+  } else if (firstTime) {
+    showWikiOverview();
+  }
+  // else: keep current content visible
+}
+
+// ── Wiki: overview page ──────────────────────────────────────────────────────
+async function showWikiOverview() {
+  setBreadcrumbWiki([{ label: 'Wiki', path: null }]);
+  await loadFile('wiki/overview.md');
+}
+
+// ── Wiki: load any file (dispatch by extension) ──────────────────────────────
+async function loadAny(relPath) {
+  if (relPath.endsWith('.pdf')) loadPdf(relPath);
+  else await loadFile(relPath);
+}
+
+async function loadFile(relPath) {
+  const body = document.getElementById('wiki-body');
+  if (!body) return;
+  body.classList.remove('pdf-mode');
+  body.innerHTML = '<div style="padding:24px;color:var(--overlay0)">Lade…</div>';
+
+  const parts = relPath.split('/');
+  setBreadcrumbWiki(parts.map((p, i) => ({
+    label: p.replace(/\.md$/, '').replace(/-/g, ' '),
+    path:  i === parts.length - 1 ? relPath : null,
+  })));
+  highlightWikiNav(relPath);
+
+  try {
+    const r = await fetch(`/api/file?path=${encodeURIComponent(relPath)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const { html, frontmatter, readonly } = await r.json();
+
+    body.innerHTML = buildFmBar(frontmatter || {}, relPath, readonly) + (html || '');
+
+    // Wire up wikilink click handlers
+    body.querySelectorAll('a.wikilink').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        const href = a.getAttribute('href');
+        if (href) loadAny(href);
+      });
+    });
+
+    const content = document.getElementById('wiki-content');
+    if (content) content.scrollTop = 0;
+  } catch (e) {
+    body.innerHTML = `<div style="padding:24px;color:var(--red)">Fehler: ${esc(e.message)}</div>`;
+  }
+}
+
+function loadPdf(relPath) {
+  const body = document.getElementById('wiki-body');
+  if (!body) return;
+  body.classList.add('pdf-mode');
+  const parts = relPath.split('/');
+  setBreadcrumbWiki(parts.map(p => ({ label: p.replace(/-/g, ' '), path: null })));
+  highlightWikiNav(relPath);
+  const url = `/api/raw?path=${encodeURIComponent(relPath)}`;
+  body.innerHTML = `
+    <div class="pdf-view">
+      <div class="pdf-toolbar">
+        <span>${esc(parts.pop())}</span>
+        <a href="${url}" target="_blank" style="color:var(--blue);font-size:12px;margin-left:auto">Öffnen ↗</a>
+      </div>
+      <iframe class="pdf-frame" src="${url}" title="PDF"></iframe>
+    </div>`;
+}
+
+// ── Wiki: frontmatter badge bar ──────────────────────────────────────────────
+function buildFmBar(fm, filePath, readonly) {
+  if (!fm || typeof fm !== 'object') return '';
+  const tags = [];
+
+  if (fm.type) {
+    const c = TYPE_COLORS[fm.type] || '#6c7086';
+    tags.push(`<span class="fm-tag" style="color:${c};border-color:${c}40;background:${c}18">${esc(fm.type)}</span>`);
+  }
+  if (fm.scope) {
+    const cls = fm.scope === 'beruflich' ? 'scope-beruflich' : 'scope-privat';
+    tags.push(`<span class="fm-tag ${cls}">${esc(fm.scope)}</span>`);
+  }
+  if (fm.status) {
+    tags.push(`<span class="fm-tag status">${esc(fm.status)}</span>`);
+  }
+  if (fm.priority) {
+    tags.push(`<span class="fm-tag priority-${esc(fm.priority)}">${esc(fm.priority)}</span>`);
+  }
+  (fm.tags || []).forEach(t => {
+    tags.push(`<span class="fm-tag clickable-tag" onclick="showTagView('${esc(String(t))}')">#${esc(String(t))}</span>`);
+  });
+  if (fm.updated) {
+    const updStr = fm.updated instanceof Date
+      ? fm.updated.toISOString().slice(0, 10)
+      : String(fm.updated).slice(0, 10);
+    tags.push(`<span class="fm-tag" style="color:var(--overlay1)">upd ${esc(updStr)}</span>`);
+  }
+  if (readonly) tags.push(`<span class="readonly-badge">read-only</span>`);
+
+  return tags.length ? `<div class="fm-bar">${tags.join('')}</div>` : '';
+}
+
+// ── Wiki: breadcrumb ─────────────────────────────────────────────────────────
+function setBreadcrumbWiki(parts) {
+  const el = document.getElementById('wiki-breadcrumb');
+  if (!el) return;
+  el.innerHTML = parts.map((p, i) => {
+    const isLast = i === parts.length - 1;
+    const label  = p.label;
+    if (isLast) return `<span style="color:var(--text)">${esc(label)}</span>`;
+    if (p.path)  return `<span class="bc-link" onclick="loadAny('${esc(p.path)}')">${esc(label)}</span>`;
+    return `<span style="color:var(--subtext0)">${esc(label)}</span>`;
+  }).join('<span class="bc-sep"> / </span>');
+}
+
+// ── Wiki: nav highlight ──────────────────────────────────────────────────────
+function highlightWikiNav(filePath) {
+  document.querySelectorAll('#wiki-nav .wiki-nav-list li a').forEach(a => {
+    a.classList.toggle('active', a.dataset.path === filePath);
+  });
+}
+
+// ── Wiki: file tree (lazy-loaded per section) ────────────────────────────────
+function initWikiFileTree() {
+  document.querySelectorAll('.wiki-nav-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const section = header.closest('.wiki-nav-section');
+      const list    = section?.querySelector('.wiki-nav-list');
+      const chevron = header.querySelector('.wiki-chevron');
+      if (!list) return;
+
+      const isOpen = !list.classList.contains('hidden');
+      list.classList.toggle('hidden', isOpen);
+      if (chevron) chevron.classList.toggle('open', !isOpen);
+
+      if (!isOpen && !list.dataset.loaded) {
+        loadNavSection(header.dataset.section, list);
+      }
+    });
+  });
+}
+
+async function loadNavSection(sectionId, listEl) {
+  listEl.dataset.loaded = '1';
+  listEl.innerHTML = '<li style="padding:4px 16px;color:var(--overlay0);font-size:11px">Lade…</li>';
+  try {
+    const r    = await fetch(`/api/list?dir=${encodeURIComponent(sectionId)}`);
+    const tree = await r.json();
+    const html = renderNavTree(tree, 0);
+    listEl.innerHTML = html || '<li style="padding:4px 16px;color:var(--overlay0);font-size:11px">Leer</li>';
+  } catch {
+    listEl.innerHTML = '<li style="padding:4px 16px;color:var(--red);font-size:11px">Fehler</li>';
+  }
+}
+
+function renderNavTree(items, depth) {
+  if (!items?.length) return '';
+  // Base indent: 8px per level. Dirs get their own indent, files get +14px extra for dot alignment
+  return items.map(item => {
+    const baseIndent = depth * 14;
+    if (item.type === 'dir') {
+      const childHtml = renderNavTree(item.children || [], depth + 1);
+      if (!childHtml) return '';
+      return `<li>
+        <span style="display:flex;align-items:center;gap:4px;padding:3px 8px 3px ${baseIndent + 8}px;cursor:pointer;color:var(--overlay1);font-size:11px;user-select:none;font-weight:500"
+          onclick="const ul=this.nextElementSibling;ul.classList.toggle('hidden');const c=this.querySelector('.nc');if(c)c.textContent=ul.classList.contains('hidden')?'▶':'▼'">
+          <span class="nc" style="font-size:9px;flex-shrink:0">▶</span>${esc(item.name)}/
+        </span>
+        <ul style="list-style:none;padding:0;margin:0" class="hidden">${childHtml}</ul>
+      </li>`;
+    }
+    const title    = item.frontmatter?.title || item.name.replace(/\.(md|pdf)$/, '').replace(/-/g, ' ');
+    const dotColor = item.frontmatter?.status ? statusColor(item.frontmatter.status) : 'var(--surface2)';
+    // Files: base indent + 8 padding + 14px for the dot area
+    const fileIndent = baseIndent + 8;
+    return `<li>
+      <a href="#" data-path="${esc(item.path)}"
+        style="display:flex;align-items:center;gap:6px;padding:3px 8px 3px ${fileIndent}px;font-size:12px;text-decoration:none;color:var(--subtext0);border-radius:4px;line-height:1.4"
+        onclick="event.preventDefault();loadAny('${esc(item.path)}')">
+        <span style="width:6px;height:6px;border-radius:50%;background:${dotColor};flex-shrink:0;margin-top:1px"></span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(title)}</span>
+      </a>
+    </li>`;
+  }).join('');
+}
+
+// ── Wiki: sidebar inline search ──────────────────────────────────────────────
+function setupWikiSearch() {
+  const input   = document.getElementById('wiki-search-input');
+  const results = document.getElementById('wiki-search-results');
+  if (!input || !results) return;
+
+  input.addEventListener('input', () => {
+    clearTimeout(_wikiSearchTimer);
+    const q = input.value.trim();
+    if (q.length < 2) { results.classList.add('hidden'); return; }
+    _wikiSearchTimer = setTimeout(async () => {
+      try {
+        const r    = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        const hits = await r.json();
+        results.innerHTML = hits.length
+          ? hits.slice(0, 10).map(h =>
+              `<div class="wiki-search-item"
+                onclick="loadAny('${esc(h.path)}');document.getElementById('wiki-search-results').classList.add('hidden');document.getElementById('wiki-search-input').value=''">
+                <div class="wiki-search-item-title">${esc(h.title)}</div>
+                <div class="wiki-search-item-meta">${esc(h.path)}</div>
+              </div>`
+            ).join('')
+          : '<div class="wiki-search-item" style="color:var(--overlay0)">Keine Treffer</div>';
+        results.classList.remove('hidden');
+      } catch { results.classList.add('hidden'); }
+    }, 250);
+  });
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#wiki-search-box')) results.classList.add('hidden');
+  });
+}
+
+// ── Wiki: tag view ───────────────────────────────────────────────────────────
+async function showTagView(tag) {
+  setView('wiki');
+  const body = document.getElementById('wiki-body');
+  if (!body) return;
+  setBreadcrumbWiki([{ label: 'Wiki', path: null }, { label: `#${tag}`, path: null }]);
+  body.innerHTML = '<div style="padding:24px;color:var(--overlay0)">Lade…</div>';
+  try {
+    const r     = await fetch(`/api/tag?tag=${encodeURIComponent(tag)}`);
+    const items = await r.json();
+    if (!items.length) {
+      body.innerHTML = `<div style="padding:24px;color:var(--overlay0)">Keine Einträge mit Tag #${esc(tag)}</div>`;
+      return;
+    }
+    body.innerHTML = `<h2 style="font-size:1.3em;font-weight:600;margin:0 0 16px;color:var(--text)">#${esc(tag)}</h2>
+      <div style="display:flex;flex-direction:column;gap:6px">` +
+      items.map(it => {
+        const c = TYPE_COLORS[it.type] || '#6c7086';
+        return `<div style="display:flex;gap:10px;align-items:center;padding:10px 14px;background:var(--surface0);border-radius:6px;cursor:pointer;border:1px solid transparent"
+            onmouseover="this.style.borderColor='var(--blue)'" onmouseout="this.style.borderColor='transparent'"
+            onclick="loadAny('${esc(it.path)}')">
+          <span style="width:8px;height:8px;border-radius:50%;background:${c};flex-shrink:0"></span>
+          <div>
+            <div style="font-size:13px;font-weight:500">${esc(it.title)}</div>
+            <div style="font-size:11px;color:var(--overlay0)">${esc(it.path)}</div>
+          </div>
+        </div>`;
+      }).join('') + '</div>';
+  } catch (e) {
+    body.innerHTML = `<div style="padding:24px;color:var(--red)">Fehler: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Graph: view ──────────────────────────────────────────────────────────────
+async function showGraphView() {
+  const svg      = document.getElementById('graph-svg');
+  const legendEl = document.getElementById('graph-legend');
+  if (!svg) return;
+
+  if (legendEl && !legendEl.dataset.built) {
+    legendEl.dataset.built = '1';
+    legendEl.innerHTML = Object.entries(TYPE_COLORS).map(([t, c]) =>
+      `<span class="graph-legend-item">
+        <span class="graph-legend-dot" style="background:${c}"></span>${t}
+      </span>`
+    ).join('');
+  }
+
+  if (!_graphData) {
+    svg.innerHTML = '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="var(--overlay0)" font-size="14">Lade Graph…</text>';
+    try {
+      const r = await fetch('/api/graph');
+      _graphData = await r.json();
+    } catch (e) {
+      svg.innerHTML = `<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="var(--red)" font-size="14">Fehler: ${esc(e.message)}</text>`;
+      return;
+    }
+    requestAnimationFrame(() => renderGraph(_graphData));
+  } else {
+    requestAnimationFrame(() => renderGraph(_graphData));
+  }
+
+  const filterInput = document.getElementById('graph-filter');
+  if (filterInput && !filterInput.dataset.bound) {
+    filterInput.dataset.bound = '1';
+    filterInput.addEventListener('input', () => {
+      if (!_graphData) return;
+      const q = filterInput.value.toLowerCase().trim();
+      if (!q) { renderGraph(_graphData); return; }
+      const nodeIds = new Set();
+      const filteredNodes = _graphData.nodes.filter(n => {
+        const hit = n.label.toLowerCase().includes(q) ||
+          (n.type || '').includes(q) || (n.path || '').includes(q);
+        if (hit) nodeIds.add(n.id);
+        return hit;
+      });
+      renderGraph({
+        nodes: filteredNodes,
+        edges: _graphData.edges.filter(e => {
+          const s = typeof e.source === 'object' ? e.source.id : e.source;
+          const t = typeof e.target === 'object' ? e.target.id : e.target;
+          return nodeIds.has(s) && nodeIds.has(t);
+        }),
+      });
+    });
+  }
+}
+
+function renderGraph(data) {
+  const container = document.getElementById('view-graph');
+  const svg       = document.getElementById('graph-svg');
+  if (!svg || !data || typeof d3 === 'undefined') return;
+
+  // Get dimensions from the container (forces layout reflow)
+  const W = container?.offsetWidth  || 0;
+  const H = (container?.offsetHeight || 0) - 52; // subtract toolbar height
+
+  // If layout hasn't happened yet, retry next frame
+  if (W < 50 || H < 100) {
+    requestAnimationFrame(() => renderGraph(data));
+    return;
+  }
+
+  svg.setAttribute('width',  W);
+  svg.setAttribute('height', H);
+  svg.innerHTML = '';
+
+  const root = d3.select(svg);
+  const g    = root.append('g');
+  const zoom = d3.zoom().scaleExtent([0.05, 5])
+    .on('zoom', e => g.attr('transform', e.transform));
+  root.call(zoom);
+
+  const nodes = data.nodes.map(n => ({ ...n }));
+  const nodeIds = new Set(nodes.map(n => n.id));
+  const links = (data.edges || [])
+    .map(e => ({
+      source: typeof e.source === 'object' ? e.source.id : e.source,
+      target: typeof e.target === 'object' ? e.target.id : e.target,
+    }))
+    .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
+
+  if (_graphSim) _graphSim.stop();
+  const linkForce = d3.forceLink(links).id(d => d.id).distance(60);
+  _graphSim = d3.forceSimulation(nodes)
+    .force('link',    linkForce)
+    .force('charge',  d3.forceManyBody().strength(-300))
+    .force('center',  d3.forceCenter(W / 2, H / 2))
+    .force('collide', d3.forceCollide(20))
+    .alphaDecay(0.03); // slower decay → more time to spread
+
+  const link = g.append('g')
+    .attr('stroke', 'var(--surface1)').attr('stroke-opacity', 0.5)
+    .selectAll('line').data(links).join('line').attr('stroke-width', 1);
+
+  const node = g.append('g').selectAll('g').data(nodes).join('g')
+    .attr('cursor', 'pointer')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) _graphSim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end',   (e, d) => { if (!e.active) _graphSim.alphaTarget(0); d.fx = null; d.fy = null; })
+    )
+    .on('click', (e, d) => { e.stopPropagation(); openWikiFile(d.path); })
+    .on('mouseover', (e, d) => {
+      const tip = document.getElementById('graph-tooltip');
+      if (!tip) return;
+      tip.innerHTML = `<strong>${esc(d.label)}</strong><br>
+        <span style="color:var(--overlay0)">${esc(d.type || '')} · ${esc(d.path || '')}</span>`;
+      tip.style.left = (e.clientX + 14) + 'px';
+      tip.style.top  = (e.clientY - 10) + 'px';
+      tip.classList.remove('hidden');
+    })
+    .on('mouseout', () => {
+      document.getElementById('graph-tooltip')?.classList.add('hidden');
+    });
+
+  node.append('circle')
+    .attr('r', 7)
+    .attr('fill', d => TYPE_COLORS[d.type] || '#6c7086')
+    .attr('stroke', 'var(--base)')
+    .attr('stroke-width', 1.5);
+
+  node.append('text')
+    .attr('x', 10).attr('dy', '0.35em')
+    .attr('fill', 'var(--subtext0)').attr('font-size', 10)
+    .attr('pointer-events', 'none')
+    .text(d => d.label.length > 22 ? d.label.slice(0, 20) + '…' : d.label);
+
+  _graphSim.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x || 0).attr('y1', d => d.source.y || 0)
+      .attr('x2', d => d.target.x || 0).attr('y2', d => d.target.y || 0);
+    node.attr('transform', d => `translate(${d.x || 0},${d.y || 0})`);
+  });
+
+  // Auto-fit the viewport once the simulation has settled
+  _graphSim.on('end', () => {
+    if (!nodes.length) return;
+    const xs = nodes.map(d => d.x), ys = nodes.map(d => d.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const gW   = maxX - minX || 1;
+    const gH   = maxY - minY || 1;
+    const pad  = 60;
+    const scale = Math.min((W - pad * 2) / gW, (H - pad * 2) / gH, 2);
+    const tx    = W / 2 - scale * (minX + gW / 2);
+    const ty    = H / 2 - scale * (minY + gH / 2);
+    root.transition().duration(600)
+      .call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+  });
+}
+
+// ── Search: main view ────────────────────────────────────────────────────────
+function onSearchInput(value) {
+  clearTimeout(_searchTimer);
+  const q       = (value || '').trim();
+  const results = document.getElementById('search-results-main');
+  if (!results) return;
+
+  if (q.length < 2) {
+    results.innerHTML = '<div style="color:var(--overlay0);padding:12px 0">Mindestens 2 Zeichen eingeben…</div>';
+    return;
+  }
+  results.innerHTML = '<div style="color:var(--overlay0);padding:12px 0">Suche…</div>';
+
+  _searchTimer = setTimeout(async () => {
+    try {
+      const r    = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const hits = await r.json();
+      if (!hits.length) {
+        results.innerHTML = `<div style="color:var(--overlay0);padding:12px 0">Keine Treffer für „${esc(q)}"</div>`;
+        return;
+      }
+      results.innerHTML = hits.map(h => {
+        const c = TYPE_COLORS[h.type] || '#6c7086';
+        return `<div class="search-result-item" onclick="openWikiFile('${esc(h.path)}')">
+          <div class="search-result-title">${esc(h.title)}</div>
+          <div class="search-result-meta">
+            <span style="color:${c}">${esc(h.type || '—')}</span>
+            · <span>${esc(h.path)}</span>
+            ${h.scope ? ` · <span style="color:var(--overlay0)">${esc(h.scope)}</span>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      results.innerHTML = `<div style="color:var(--red);padding:12px 0">Fehler: ${esc(e.message)}</div>`;
+    }
+  }, 300);
 }

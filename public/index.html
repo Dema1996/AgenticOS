@@ -76,6 +76,19 @@
           <span id="trash-count-badge" class="trash-nav-badge hidden"></span>
         </a>
       </div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">WIKI</div>
+        <a class="nav-link" data-view="wiki" onclick="setView('wiki')">
+          <i data-lucide="book-open"></i> Wiki
+        </a>
+        <a class="nav-link" data-view="graph" onclick="setView('graph')">
+          <i data-lucide="network"></i> Graph
+        </a>
+        <a class="nav-link" data-view="search" onclick="setView('search')">
+          <i data-lucide="search"></i> Suche
+        </a>
+      </div>
     </aside>
 
     <!-- Main content -->
@@ -313,6 +326,72 @@
         </section>
       </div>
 
+      <!-- Wiki view -->
+      <div id="view-wiki" class="view hidden wiki-layout">
+        <aside id="wiki-sidebar">
+          <div id="wiki-search-box">
+            <input type="text" id="wiki-search-input" placeholder="Suchen…" autocomplete="off" spellcheck="false">
+            <div id="wiki-search-results" class="hidden"></div>
+          </div>
+          <nav id="wiki-nav">
+            <div class="wiki-nav-section" id="wiki-sec-projects">
+              <div class="wiki-nav-header" data-section="projects">
+                <span class="wiki-chevron">▶</span><span>📁 Projekte</span>
+              </div>
+              <ul class="wiki-nav-list hidden"></ul>
+            </div>
+            <div class="wiki-nav-section" id="wiki-sec-todos">
+              <div class="wiki-nav-header" data-section="todos">
+                <span class="wiki-chevron">▶</span><span>✅ Todos</span>
+              </div>
+              <ul class="wiki-nav-list hidden"></ul>
+            </div>
+            <div class="wiki-nav-section" id="wiki-sec-wiki">
+              <div class="wiki-nav-header" data-section="wiki">
+                <span class="wiki-chevron">▶</span><span>🧠 Wiki</span>
+              </div>
+              <ul class="wiki-nav-list hidden"></ul>
+            </div>
+            <div class="wiki-nav-section" id="wiki-sec-raw">
+              <div class="wiki-nav-header" data-section="raw">
+                <span class="wiki-chevron">▶</span><span>📦 Raw</span>
+              </div>
+              <ul class="wiki-nav-list hidden"></ul>
+            </div>
+          </nav>
+        </aside>
+        <div id="wiki-content">
+          <div id="wiki-breadcrumb"></div>
+          <div id="wiki-body" class="markdown-body"></div>
+        </div>
+      </div>
+
+      <!-- Graph view -->
+      <div id="view-graph" class="view hidden">
+        <div id="graph-toolbar">
+          <span class="section-label">GRAPH</span>
+          <input id="graph-filter" class="config-input" placeholder="Agent / Typ filtern…" style="width:200px;padding:5px 10px">
+          <div id="graph-legend"></div>
+        </div>
+        <svg id="graph-svg"></svg>
+        <div id="graph-tooltip" class="hidden"></div>
+      </div>
+
+      <!-- Search view -->
+      <div id="view-search" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">SUCHE</span>
+          </div>
+          <div style="margin-bottom:16px">
+            <input id="search-input-main" class="config-input" placeholder="Suchbegriff eingeben…"
+              style="width:100%;max-width:480px;padding:8px 12px;font-size:14px"
+              oninput="onSearchInput(this.value)">
+          </div>
+          <div id="search-results-main"></div>
+        </section>
+      </div>
+
     </main>
 
     <!-- Right: Agent panel -->
@@ -515,6 +594,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="/lib/sortable.min.js"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

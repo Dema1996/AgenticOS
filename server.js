@@ -796,6 +796,362 @@ app.post('/api/exec', (req, res) => {
   res.json({ taskId });
 });
 
+// ── Wiki: Wikilink-Index & Resolver ──────────────────────────────────────────
+const { marked } = require('marked');
+marked.use({ gfm: true });
+
+let _wikilinkCache = null;
+function wikilinkIndex() {
+  if (_wikilinkCache) return _wikilinkCache;
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return {};
+  const idx = {};
+  const SCAN = ['projects', 'todos', 'notizen', 'wiki', 'entities', 'raw'];
+
+  function scan(dir, rel) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scan(full, relPath);
+      } else if (entry.name.endsWith('.md') || entry.name.endsWith('.base')) {
+        const dot  = entry.name.lastIndexOf('.');
+        const stem = entry.name.slice(0, dot);
+        idx[stem] = relPath;
+        idx[relPath.slice(0, relPath.lastIndexOf('.'))] = relPath;
+      }
+    }
+  }
+
+  for (const d of SCAN) scan(path.join(vaultPath, d), d);
+  for (const f of fs.readdirSync(vaultPath)) {
+    if (f.endsWith('.md') && !f.startsWith('.')) idx[f.slice(0, -3)] = f;
+  }
+  _wikilinkCache = idx;
+  return idx;
+}
+
+function invalidateWikilinkCache() { _wikilinkCache = null; }
+
+function resolveWikilinks(html) {
+  const idx = wikilinkIndex();
+
+  function lookup(key) {
+    const noExt = key.replace(/\.[^./]+$/, '');
+    return idx[key] || idx[noExt] || idx[key.split('/').pop()] || idx[noExt.split('/').pop()];
+  }
+
+  function displayText(raw, label) {
+    return (label || raw).split('/').pop().replace(/\.[^.]+$/, '').replace(/-/g, ' ');
+  }
+
+  html = html.replace(/!\[\[([^\]]+)\]\]/g, (_, inner) => {
+    const [rawTarget, label] = inner.split('|');
+    const key      = rawTarget.trim();
+    const display  = displayText(rawTarget, label);
+    const resolved = lookup(key);
+    if (resolved) {
+      const isBase = resolved.endsWith('.base');
+      return `<span class="embed-link${isBase ? ' embed-kanban' : ''}" data-path="${resolved}">${isBase ? '📋' : '📄'} ${display}</span>`;
+    }
+    return `<span class="wikilink-missing" title="${key}">⚠ ${display}</span>`;
+  });
+
+  html = html.replace(/\[\[([^\]]+)\]\]/g, (_, inner) => {
+    const [rawTarget, label] = inner.split('|');
+    const key      = rawTarget.trim();
+    const display  = displayText(rawTarget, label);
+    const resolved = lookup(key);
+    if (resolved) {
+      return `<a class="wikilink" data-path="${resolved}" href="#">${display}</a>`;
+    }
+    return `<span class="wikilink-missing" title="${key}">⚠ ${display}</span>`;
+  });
+
+  return html;
+}
+
+function vaultSafePath(rel) {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return null;
+  const full = path.resolve(vaultPath, rel);
+  if (!full.startsWith(path.resolve(vaultPath) + path.sep) && full !== path.resolve(vaultPath)) return null;
+  return full;
+}
+
+// ── Wiki: File render ─────────────────────────────────────────────────────────
+app.get('/api/file', (req, res) => {
+  const rel = req.query.path;
+  if (!rel) return res.status(400).json({ error: 'path required' });
+  const full = vaultSafePath(rel);
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'not found' });
+  try {
+    const raw = fs.readFileSync(full, 'utf-8');
+    const { data: frontmatter, content } = matter(raw);
+    let html = marked.parse(content);
+    html = resolveWikilinks(html);
+    const readonly = rel.startsWith('raw/');
+    res.json({ html, frontmatter, path: rel, readonly });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Wiki: File tree ───────────────────────────────────────────────────────────
+app.get('/api/list', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.json([]);
+  const rel  = req.query.dir || '';
+  const full = rel ? vaultSafePath(rel) : vaultPath;
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'not found' });
+
+  function scan(dir, base) {
+    const result = [];
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return result; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const relPath = base ? `${base}/${entry.name}` : entry.name;
+      const fp = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        result.push({ type: 'dir', name: entry.name, path: relPath, children: scan(fp, relPath) });
+      } else if (entry.name.endsWith('.md') || entry.name.endsWith('.pdf')) {
+        let fm = {};
+        if (entry.name.endsWith('.md')) {
+          try { fm = matter(fs.readFileSync(fp, 'utf-8')).data; } catch {}
+        }
+        result.push({ type: 'file', name: entry.name, path: relPath, frontmatter: fm });
+      }
+    }
+    return result;
+  }
+
+  res.json(scan(full, rel || ''));
+});
+
+// ── Wiki: Graph ───────────────────────────────────────────────────────────────
+app.get('/api/graph', (_req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.json({ nodes: [], edges: [] });
+  const DIRS = ['projects', 'todos', 'notizen', 'wiki', 'entities'];
+  const idx = wikilinkIndex();
+  const nodes = new Map();
+  const edges = [];
+  const edgeSet = new Set();
+
+  function scan(dir, base) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const fp = path.join(dir, entry.name);
+      const relPath = base ? `${base}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        scan(fp, relPath);
+      } else if (entry.name.endsWith('.md')) {
+        let fm = {}, content = '';
+        try {
+          const parsed = matter(fs.readFileSync(fp, 'utf-8'));
+          fm = parsed.data; content = parsed.content;
+        } catch {}
+        nodes.set(relPath, {
+          id: relPath,
+          label: fm.title || entry.name.slice(0, -3).replace(/-/g, ' '),
+          type: fm.type || relPath.split('/')[0],
+          scope: fm.scope || 'privat',
+          path: relPath,
+        });
+        for (const m of content.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
+          const key = m[1].trim();
+          const target = idx[key] || idx[key.split('/').pop()];
+          if (target && target !== relPath) {
+            const edgeKey = `${relPath}→${target}`;
+            if (!edgeSet.has(edgeKey)) {
+              edgeSet.add(edgeKey);
+              edges.push({ source: relPath, target });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (const d of DIRS) scan(path.join(vaultPath, d), d);
+  // Remove edges where source or target is not in the node set
+  const validEdges = edges.filter(e => nodes.has(e.source) && nodes.has(e.target));
+  res.json({ nodes: [...nodes.values()], edges: validEdges });
+});
+
+// ── Wiki: Search ──────────────────────────────────────────────────────────────
+app.get('/api/search', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.json([]);
+  const q = (req.query.q || '').toLowerCase().trim();
+  if (q.length < 2) return res.json([]);
+
+  const idx = wikilinkIndex();
+  const seen = new Set();
+  const results = [];
+
+  for (const filePath of Object.values(idx)) {
+    if (seen.has(filePath) || !filePath.endsWith('.md')) continue;
+    seen.add(filePath);
+    const full = path.join(vaultPath, filePath);
+    if (!fs.existsSync(full)) continue;
+    try {
+      const { data: fm, content } = matter(fs.readFileSync(full, 'utf-8'));
+      const title = fm.title || filePath.split('/').pop().slice(0, -3).replace(/-/g, ' ');
+      if (title.toLowerCase().includes(q) || content.toLowerCase().includes(q)) {
+        results.push({ path: filePath, title, type: fm.type || filePath.split('/')[0], scope: fm.scope });
+        if (results.length >= 20) break;
+      }
+    } catch {}
+  }
+
+  res.json(results);
+});
+
+// ── Wiki: Tag filter ──────────────────────────────────────────────────────────
+app.get('/api/tag', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.json([]);
+  const tag = (req.query.tag || '').toLowerCase().trim();
+  if (!tag) return res.json([]);
+
+  const idx = wikilinkIndex();
+  const seen = new Set();
+  const results = [];
+
+  for (const filePath of Object.values(idx)) {
+    if (seen.has(filePath) || !filePath.endsWith('.md')) continue;
+    seen.add(filePath);
+    const full = path.join(vaultPath, filePath);
+    if (!fs.existsSync(full)) continue;
+    try {
+      const { data: fm } = matter(fs.readFileSync(full, 'utf-8'));
+      const tags = (fm.tags || []).map(t => String(t).toLowerCase());
+      if (tags.includes(tag)) {
+        results.push({
+          path: filePath,
+          title: fm.title || filePath.split('/').pop().slice(0, -3).replace(/-/g, ' '),
+          type: fm.type || filePath.split('/')[0],
+          scope: fm.scope,
+          status: fm.status,
+        });
+      }
+    } catch {}
+  }
+
+  res.json(results);
+});
+
+// ── Wiki: Kanban per directory ────────────────────────────────────────────────
+app.get('/api/kanban', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.json([]);
+  const dir = req.query.dir;
+  if (!dir) return res.status(400).json({ error: 'dir required' });
+  const full = vaultSafePath(dir);
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'not found' });
+
+  const cards = [];
+  let entries;
+  try { entries = fs.readdirSync(full, { withFileTypes: true }); } catch { return res.json([]); }
+
+  for (const entry of entries) {
+    if (!entry.name.endsWith('.md') || entry.name.startsWith('.')) continue;
+    const fp = path.join(full, entry.name);
+    const relPath = `${dir}/${entry.name}`;
+    try {
+      const { data: fm, content } = matter(fs.readFileSync(fp, 'utf-8'));
+      let status = fm.status || 'open';
+      if (['completed', 'done'].includes(status)) status = 'done';
+      else if (['in-progress', 'in_progress', 'active'].includes(status)) status = 'in-progress';
+      else status = 'open';
+      const descLine = content.trim().split('\n')
+        .find(l => l.trim() && !l.startsWith('#') && !l.startsWith('---')) || '';
+      cards.push({
+        path: relPath,
+        title: fm.title || entry.name.slice(0, -3).replace(/-/g, ' '),
+        status, priority: fm.priority || null, tags: fm.tags || [], due: fm.due || null,
+        description: descLine.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, t, l) => l || t).slice(0, 100),
+      });
+    } catch {}
+  }
+
+  res.json(cards);
+});
+
+// ── Wiki: Raw file (PDF, images) ──────────────────────────────────────────────
+app.get('/api/raw', (req, res) => {
+  const rel  = req.query.path;
+  if (!rel) return res.status(400).send('path required');
+  const full = vaultSafePath(rel);
+  if (!full || !fs.existsSync(full)) return res.status(404).send('not found');
+  res.sendFile(full);
+});
+
+// ── Wiki: Todo status update (path-based) ─────────────────────────────────────
+app.patch('/api/todo', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  const { path: relPath, status } = req.body;
+  if (!relPath || !status) return res.status(400).json({ error: 'path and status required' });
+  if (!['open', 'in-progress', 'done'].includes(status)) return res.status(400).json({ error: 'invalid status' });
+  const full = vaultSafePath(relPath);
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'not found' });
+  try {
+    const raw = fs.readFileSync(full, 'utf-8');
+    const parsed = matter(raw);
+    const today = new Date().toISOString().slice(0, 10);
+    fs.writeFileSync(full, matter.stringify(parsed.content, { ...parsed.data, status, updated: today }));
+    invalidateWikilinkCache();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Wiki: Generic frontmatter update ─────────────────────────────────────────
+app.patch('/api/frontmatter', (req, res) => {
+  const { vaultPath } = readConfig();
+  if (!vaultPath) return res.status(501).json({ error: 'Kein Vault konfiguriert' });
+  const { path: relPath, updates } = req.body;
+  if (!relPath || !updates) return res.status(400).json({ error: 'path and updates required' });
+  const full = vaultSafePath(relPath);
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'not found' });
+  try {
+    const raw    = fs.readFileSync(full, 'utf-8');
+    const parsed = matter(raw);
+    const today  = new Date().toISOString().slice(0, 10);
+    fs.writeFileSync(full, matter.stringify(parsed.content, { ...parsed.data, ...updates, updated: today }));
+    invalidateWikilinkCache();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Wiki: Config-file read/write (any vault path) ────────────────────────────
+app.get('/api/config/file', (req, res) => {
+  const full = vaultSafePath(req.query.path || '');
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'not found' });
+  try { res.json({ content: fs.readFileSync(full, 'utf-8') }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/config/file', (req, res) => {
+  const { path: rel, content } = req.body;
+  if (!rel || content === undefined) return res.status(400).json({ error: 'path and content required' });
+  const full = vaultSafePath(rel);
+  if (!full) return res.status(403).json({ error: 'access denied' });
+  try {
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+    invalidateWikilinkCache();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 const { port = 4000 } = readConfig();
 app.listen(port, () => {
