@@ -59,14 +59,21 @@
         <a class="nav-link" data-view="todos" onclick="setView('todos')">
           <i data-lucide="check-square"></i> Todos
         </a>
+        <a class="nav-link" data-view="mission" onclick="setView('mission')">
+          <i data-lucide="layout-grid"></i> Mission Control
+        </a>
         <a class="nav-link" data-view="log" onclick="setView('log')">
           <i data-lucide="scroll-text"></i> Agent Log
         </a>
+        <div id="telegram-nav-entries"></div>
         <a class="nav-link" data-view="skills" onclick="setView('skills')">
           <i data-lucide="puzzle"></i> Skills
         </a>
+        <a class="nav-link" data-view="scheduler" onclick="setView('scheduler')">
+          <i data-lucide="clock"></i> Scheduler
+        </a>
         <a class="nav-link" data-view="claudemd" onclick="setView('claudemd')">
-          <i data-lucide="file-code"></i> CLAUDE.md
+          <i data-lucide="file-code"></i> Agent Config
         </a>
         <a class="nav-link" data-view="plugins" onclick="setView('plugins')">
           <i data-lucide="blocks"></i> Plugins
@@ -197,6 +204,7 @@
           <div class="content-section-header">
             <span class="section-label">SKILLS</span>
             <span id="skills-count" class="badge-count"></span>
+            <span class="agent-context-badge"></span>
             <button class="text-btn" onclick="openNewSkillForm()" style="margin-left:auto">+ Neu</button>
           </div>
           <div id="new-skill-form" class="hidden" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -284,12 +292,15 @@
           <div class="content-section-header">
             <span class="section-label">PLUGINS</span>
             <span id="plugins-installed-count" class="badge-count"></span>
+            <span class="agent-context-badge"></span>
             <span id="plugins-available-count" class="badge-count" style="background:rgba(137,180,250,0.1);color:var(--blue)"></span>
             <div class="plugin-search-wrap">
               <input id="plugin-search" class="config-input" placeholder="Plugin suchen…" oninput="filterPlugins(this.value)" style="width:200px;padding:5px 10px">
             </div>
             <button class="text-btn" onclick="loadPlugins()">↺</button>
           </div>
+
+          <div id="plugins-not-supported" class="hidden" style="padding:32px 0;text-align:center;color:var(--overlay0);font-size:13px"></div>
 
           <div id="plugins-installed-section" class="hidden">
             <div class="plugins-section-title">Installiert</div>
@@ -312,6 +323,105 @@
             <button class="text-btn" onclick="loadTrash()">↺</button>
           </div>
           <div id="trash-list"></div>
+        </section>
+      </div>
+
+      <!-- Scheduler view -->
+      <div id="view-scheduler" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">SCHEDULER</span>
+            <span id="scheduler-job-count" class="badge-count"></span>
+            <button class="btn-secondary" onclick="openNewJobModal()">+ Job</button>
+            <button class="text-btn" onclick="loadSchedulerJobs()">↺</button>
+          </div>
+          <div id="scheduler-job-list"></div>
+        </section>
+      </div>
+
+      <!-- New Scheduler Job modal -->
+      <div id="scheduler-job-overlay" class="overlay hidden">
+        <div class="modal" style="width:460px">
+          <div class="modal-header">
+            <span id="sj-modal-title" class="modal-title">Neuer Job</span>
+            <button class="modal-close" onclick="closeNewJobModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="cfg-tab-panel">
+              <div class="config-field">
+                <label>Name</label>
+                <input id="sj-name" class="config-input" placeholder="z.B. Morgenroutine">
+              </div>
+              <div class="config-field">
+                <label>Häufigkeit</label>
+                <select id="sj-preset" class="config-input" onchange="onJobPresetChange()"></select>
+              </div>
+              <div class="config-field" id="sj-cron-wrap">
+                <label>Cron-Ausdruck</label>
+                <input id="sj-cron" class="config-input" placeholder="0 7 * * *" style="font-family:monospace">
+                <span class="field-hint">Minuten Stunden Tag Monat Wochentag</span>
+              </div>
+              <div class="config-field">
+                <label>Agent</label>
+                <select id="sj-agent" class="config-input"></select>
+              </div>
+              <div class="config-field">
+                <label>Prompt / Aufgabe</label>
+                <textarea id="sj-prompt" class="config-input" rows="3"
+                  placeholder="z.B. /morgen — Führe die Morgenroutine aus" style="resize:vertical"></textarea>
+              </div>
+              <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+                <button class="btn-secondary" onclick="closeNewJobModal()">Abbrechen</button>
+                <button class="btn-primary" id="sj-save-btn" onclick="saveJob()">Erstellen</button>
+              </div>
+              <div id="sj-err" style="font-size:12px;color:var(--red);display:none"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mission Control view -->
+      <div id="view-mission" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">MISSION CONTROL</span>
+            <span id="mission-task-count" class="badge-count"></span>
+            <button class="btn-secondary" onclick="openNewMissionTaskModal()">+ Task</button>
+            <button class="text-btn" onclick="loadMissionTasks()">↺</button>
+          </div>
+          <div id="mission-kanban" class="mission-kanban">
+            <div class="mission-col">
+              <div class="mission-col-header col-queued">
+                Queued <span class="col-count" id="mcount-queued">0</span>
+              </div>
+              <div class="mission-cards" id="mcards-queued"></div>
+            </div>
+            <div class="mission-col">
+              <div class="mission-col-header col-running">
+                Running <span class="col-count" id="mcount-running">0</span>
+              </div>
+              <div class="mission-cards" id="mcards-running"></div>
+            </div>
+            <div class="mission-col">
+              <div class="mission-col-header col-done-m">
+                Done <span class="col-count" id="mcount-done">0</span>
+              </div>
+              <div class="mission-cards" id="mcards-done"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Telegram view -->
+      <div id="view-telegram" class="view hidden">
+        <section class="content-section">
+          <div class="content-section-header">
+            <span class="section-label">TELEGRAM</span>
+            <span id="telegram-status-text" style="font-size:12px;color:var(--overlay0)"></span>
+            <span id="telegram-msg-count" class="badge-count"></span>
+            <button class="text-btn" onclick="loadTelegramMessages()">↺</button>
+          </div>
+          <div id="telegram-chat-log"></div>
         </section>
       </div>
 
@@ -449,6 +559,80 @@
   </div>
 </div>
 
+<!-- ── Todo → Agent modal ────────────────────────────────────────────────────── -->
+<div id="todo-agent-overlay" class="overlay hidden">
+  <div class="modal" style="width:400px">
+    <div class="modal-header">
+      <span class="modal-title">An Agent senden</span>
+      <button class="modal-close" onclick="closeTodoAgentModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="cfg-tab-panel">
+        <div class="config-field">
+          <label>Todo</label>
+          <div id="ta-title" style="font-size:13px;color:var(--text);padding:6px 0;line-height:1.4"></div>
+        </div>
+        <div class="config-field">
+          <label>Agent</label>
+          <select id="ta-agent" class="config-input"></select>
+        </div>
+        <div class="config-field">
+          <label>Zusätzlicher Kontext <span style="font-weight:400;color:var(--overlay0)">(optional)</span></label>
+          <textarea id="ta-description" class="config-input" rows="2"
+            placeholder="Was genau soll der Agent tun?" style="resize:vertical"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+          <button class="btn-secondary" onclick="closeTodoAgentModal()">Abbrechen</button>
+          <button class="btn-secondary" onclick="submitTodoAgent(false)">📋 Nur einreihen</button>
+          <button class="btn-primary" onclick="submitTodoAgent(true)">▶ Einreihen &amp; Starten</button>
+        </div>
+        <div id="ta-err" style="font-size:12px;color:var(--red);display:none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── New Mission Task modal ─────────────────────────────────────────────────── -->
+<div id="mission-task-overlay" class="overlay hidden">
+  <div class="modal" style="width:440px">
+    <div class="modal-header">
+      <span class="modal-title">Neuer Mission Task</span>
+      <button class="modal-close" onclick="closeNewMissionTaskModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="cfg-tab-panel">
+        <div class="config-field">
+          <label>Titel</label>
+          <input id="mt-title" class="config-input" type="text" placeholder="Was soll getan werden?" autocomplete="off">
+        </div>
+        <div class="config-field">
+          <label>Beschreibung <span style="font-weight:400;color:var(--overlay0)">(optional)</span></label>
+          <textarea id="mt-description" class="config-input" rows="3" placeholder="Zusätzlicher Kontext für den Agenten…" style="resize:vertical"></textarea>
+        </div>
+        <div style="display:flex;gap:12px">
+          <div class="config-field" style="flex:1">
+            <label>Agent</label>
+            <select id="mt-agent" class="config-input"></select>
+          </div>
+          <div class="config-field" style="flex:1">
+            <label>Priorität</label>
+            <select id="mt-priority" class="config-input">
+              <option value="high">Hoch</option>
+              <option value="medium" selected>Mittel</option>
+              <option value="low">Niedrig</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+          <button class="btn-secondary" onclick="closeNewMissionTaskModal()">Abbrechen</button>
+          <button class="btn-primary" onclick="submitNewMissionTask()">Erstellen</button>
+        </div>
+        <div id="mt-err" style="font-size:12px;color:var(--red);display:none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── New Todo modal ───────────────────────────────────────────────────────── -->
 <div id="todo-overlay" class="overlay hidden">
   <div class="modal" style="width:420px">
@@ -529,12 +713,30 @@
         <div id="agents-config-list"></div>
         <button class="btn-secondary" onclick="showAddAgentForm()" style="margin-top:12px">+ Neuer Agent</button>
         <div id="add-agent-form" class="hidden" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
-          <input id="new-agent-name" class="config-input" placeholder="Name (z.B. Claude Code)">
-          <input id="new-agent-id" class="config-input" placeholder="ID (z.B. claude-code)">
-          <input id="new-agent-command" class="config-input" placeholder="Befehl (z.B. claude)">
-          <input id="new-agent-args" class="config-input" placeholder="Args (z.B. --print)">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11px;color:var(--overlay0)">Template</label>
+            <select id="new-agent-template" class="config-input" onchange="onNewAgentTemplate()">
+              <option value="claude-code">Claude Code</option>
+              <option value="codex">Codex CLI</option>
+              <option value="custom">Andere</option>
+            </select>
+          </div>
+          <div id="new-agent-model-wrap">
+            <label style="font-size:11px;color:var(--overlay0)">Modell</label>
+            <select id="new-agent-model" class="config-input" onchange="onNewAgentModel()" style="margin-top:4px">
+              <option value="">Sonnet 4.6  (Standard)</option>
+              <option value="claude-opus-4-7">Opus 4.7</option>
+              <option value="claude-opus-4-6">Opus 4.6</option>
+              <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+            </select>
+          </div>
+          <div style="height:1px;background:var(--surface1);margin:2px 0"></div>
+          <input id="new-agent-name" class="config-input" placeholder="Name (z.B. Mein Agent)">
+          <input id="new-agent-id" class="config-input" placeholder="ID (z.B. mein-agent)">
+          <input id="new-agent-command" class="config-input" placeholder="Befehl" value="claude">
+          <input id="new-agent-args" class="config-input" placeholder="Args" value="--print">
           <input id="new-agent-workdir" class="config-input" placeholder="Arbeitsverzeichnis">
-          <input id="new-agent-color" class="config-input" placeholder="Farbe (z.B. #89b4fa)">
+          <input id="new-agent-color" class="config-input" placeholder="Farbe" value="#89b4fa">
           <button class="btn-primary" onclick="saveNewAgent()">Agent speichern</button>
           <span id="agent-save-msg"></span>
         </div>

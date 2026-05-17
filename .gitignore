@@ -1,5 +1,9 @@
 node_modules/
 data/task-history.json
+data/*.db
+data/*.db-shm
+data/*.db-wal
 config.json
+.env
 .DS_Store
 *.log

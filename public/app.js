@@ -1,5 +1,66 @@
 'use strict';
 
+// ── Agent Templates ────────────────────────────────────────────────────────
+const AGENT_TEMPLATES = {
+  'claude-code': {
+    label:       'Claude Code',
+    command:     'claude',
+    args:        '--print',
+    color:       '#89b4fa',
+    description: 'Claude Code CLI als KI-Agent für Workspace-Operationen',
+    models: [
+      { label: 'Sonnet 4.6  (Standard)', id: '',                            args: '--print' },
+      { label: 'Opus 4.7',               id: 'claude-opus-4-7',             args: '--print --model claude-opus-4-7' },
+      { label: 'Opus 4.6',               id: 'claude-opus-4-6',             args: '--print --model claude-opus-4-6' },
+      { label: 'Haiku 4.5',              id: 'claude-haiku-4-5-20251001',   args: '--print --model claude-haiku-4-5-20251001' },
+    ],
+  },
+  'codex': {
+    label:       'Codex CLI',
+    command:     'codex',
+    args:        'exec --skip-git-repo-check',
+    color:       '#a6e3a1',
+    description: 'OpenAI Codex CLI für autonome Code-Aufgaben',
+    models: [
+      { label: 'Auto (Standard)', id: '',        args: 'exec --skip-git-repo-check' },
+      { label: 'o4-mini',         id: 'o4-mini', args: 'exec --skip-git-repo-check -c model="o4-mini"' },
+      { label: 'o3',              id: 'o3',      args: 'exec --skip-git-repo-check -c model="o3"' },
+    ],
+  },
+  'custom': {
+    label:       'Andere',
+    command:     '',
+    args:        '',
+    color:       '#cba6f7',
+    description: '',
+    models:      [],
+  },
+};
+
+function detectTemplate(command) {
+  if (command === 'claude') return 'claude-code';
+  if (command === 'codex')  return 'codex';
+  return 'custom';
+}
+
+function detectModelId(templateKey, argsStr) {
+  const tpl = AGENT_TEMPLATES[templateKey];
+  if (!tpl?.models?.length) return '';
+  for (const m of tpl.models) {
+    if (m.id && argsStr?.includes(m.id)) return m.id;
+  }
+  return '';
+}
+
+function modelOptionsHtml(templateKey, currentArgs) {
+  const tpl = AGENT_TEMPLATES[templateKey];
+  if (!tpl?.models?.length) return '';
+  const currentId = detectModelId(templateKey, currentArgs);
+  return tpl.models.map(m =>
+    `<option value="${esc(m.id)}"${m.id === currentId ? ' selected' : ''}>${esc(m.label)}</option>`
+  ).join('');
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 let config      = {};
 let agents      = [];
@@ -67,7 +128,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function loadAll() {
   await loadConfig();
-  await Promise.all([loadAgents(), loadProjects(), loadTodos(), loadTrash()]);
+  await Promise.all([loadAgents(), loadTrash()]);
+  await refreshVaultData();
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -98,14 +160,18 @@ function renderAgentsSidebar() {
     const dotColor  = isRunning ? '#a6e3a1' : (a.color || '#6c7086');
     const opacity   = isRunning ? '1' : '0.5';
     const isActive  = a.id === currentAgentId;
+    const model     = a.command || '';
+    const tgIcon      = a.telegramToken ? ' <span style="font-size:10px" title="Telegram aktiv">🤖</span>' : '';
+    const defaultIcon = a.isDefault ? ' <span class="agent-default-badge" title="Standard-Agent">★</span>' : '';
     return `<div class="agent-item${isActive ? ' active' : ''}" data-agent-id="${esc(a.id)}" onclick="selectAgent('${esc(a.id)}')">
       <span class="agent-dot" style="background:${dotColor};opacity:${opacity}"></span>
       <div class="agent-info">
-        <span class="agent-name">${esc(a.name)}</span>
-        <span class="agent-subtext">${isRunning ? '● aktiv' : 'Idle'}</span>
+        <span class="agent-name">${esc(a.name)}${tgIcon}${defaultIcon}</span>
+        <span class="agent-subtext">${esc(model)} · ${isRunning ? '<span style="color:var(--green)">aktiv</span>' : 'Idle'}</span>
       </div>
     </div>`;
   }).join('');
+  renderTelegramNav();
 }
 
 function renderAgentSelector() {
@@ -149,16 +215,54 @@ function selectAgent(id) {
   document.querySelectorAll('.agent-item').forEach(el =>
     el.classList.toggle('active', el.dataset.agentId === id)
   );
-  // Show workDir in badge
   const agent = agents.find(a => a.id === id);
   const badge = document.getElementById('agent-workdir-badge');
   if (badge && agent?.workDir) {
-    // Show short form: ~/FolderName
     const short = agent.workDir.replace(/^.*\/([^/]+)$/, '…/$1');
     badge.textContent = short;
     badge.title = `Arbeitsverzeichnis: ${agent.workDir}`;
   }
   loadRecentTasks();
+  syncAgentSelects(id);
+}
+
+// Syncs all agent dropdowns + context-sensitive views to the active agent
+function syncAgentSelects(id) {
+  const agent = agents.find(a => a.id === id);
+
+  // All <select> elements that list agents by value
+  const selects = ['mt-agent', 'ta-agent', 'sj-agent', 'run-command-agent'];
+  for (const selId of selects) {
+    const el = document.getElementById(selId);
+    if (el && el.querySelector(`option[value="${id}"]`)) el.value = id;
+  }
+
+  // Update agent context badge wherever shown
+  document.querySelectorAll('.agent-context-badge').forEach(el => {
+    el.textContent = agent ? agent.name : '';
+    el.style.background = agent?.color ? `${agent.color}22` : '';
+    el.style.color       = agent?.color || 'var(--overlay0)';
+  });
+
+  // Agent Config view: switch if visible
+  const configView = document.getElementById('view-claudemd');
+  if (configView && !configView.classList.contains('hidden')) {
+    const sel = document.getElementById('claudemd-agent-select');
+    if (sel && sel.querySelector(`option[value="${id}"]`)) {
+      sel.value = id;
+      loadClaudemd(id);
+    }
+  }
+
+  // Skills view: reload if visible
+  if (!document.getElementById('view-skills')?.classList.contains('hidden')) {
+    loadSkills();
+  }
+
+  // Plugins view: reload if visible
+  if (!document.getElementById('view-plugins')?.classList.contains('hidden')) {
+    loadPlugins();
+  }
 }
 
 // ── Projects ───────────────────────────────────────────────────────────────
@@ -168,6 +272,47 @@ async function loadProjects() {
     projects = await r.json();
     renderProjects();
   } catch {}
+}
+
+async function refreshVaultData() {
+  await loadProjects();
+  await loadTodos();
+}
+
+function projectDisplayName(projectId) {
+  const project = projects.find(p => p.id === projectId);
+  return (project?.title || projectId || '').replace(/-/g, ' ');
+}
+
+function projectOptionItems() {
+  const byId = new Map();
+  for (const project of projects) {
+    if (!project?.id) continue;
+    byId.set(project.id, {
+      id: project.id,
+      title: project.title || project.id.replace(/-/g, ' '),
+    });
+  }
+  for (const todo of todos) {
+    if (!todo?.project || byId.has(todo.project)) continue;
+    byId.set(todo.project, {
+      id: todo.project,
+      title: todo.project.replace(/-/g, ' '),
+    });
+  }
+  return [...byId.values()]
+    .sort((a, b) => a.title.localeCompare(b.title, 'de', { sensitivity: 'base' }));
+}
+
+function projectOptionsHtml(currentProject, { includeAll = false, includeInbox = false } = {}) {
+  const current = currentProject || '';
+  return [
+    includeAll ? `<option value=""${!current ? ' selected' : ''}>Alle Projekte</option>` : '',
+    includeInbox ? `<option value="__inbox__"${current === '__inbox__' ? ' selected' : ''}>📥 Inbox</option>` : '',
+    ...projectOptionItems().map(p =>
+      `<option value="${esc(p.id)}"${p.id === current ? ' selected' : ''}>${esc(p.title)}</option>`
+    ),
+  ].join('');
 }
 
 function renderProjects() {
@@ -284,12 +429,10 @@ function renderKanban(filterProject) {
   if (filterProject === undefined) filterProject = sel ? sel.value : '';
   else if (sel) sel.value = filterProject;
 
-  // Rebuild dropdown options from current todos (deduplicated)
+  // Rebuild dropdown options from projects plus todo folders.
   if (sel) {
-    const projects = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
-    const current = sel.value;
-    sel.innerHTML = '<option value="">Alle Projekte</option>' +
-      projects.map(p => `<option value="${esc(p)}"${p === current ? ' selected' : ''}>${esc(p.replace(/-/g,' '))}</option>`).join('');
+    const current = filterProject || sel.value || '';
+    sel.innerHTML = projectOptionsHtml(current, { includeAll: true });
     sel.value = filterProject || '';
   }
 
@@ -373,8 +516,8 @@ function fillCol(containerId, items, colType) {
   el.innerHTML = items.map(t => {
     const idx = renderedTodos.length;
     renderedTodos.push({ ...t, colType });
-    const proj = t.file ? t.file.replace('.md','').replace(/-/g,' ') : '';
     const isDone = colType === 'done';
+    const todoJson = esc(JSON.stringify({ text: t.text, file: t.file, project: t.project }));
     return `<div class="todo-card" data-todo-idx="${idx}">
       <div class="todo-text${isDone ? ' done-text' : ''}">${esc(t.text)}</div>
       <div class="todo-meta">
@@ -386,6 +529,8 @@ function fillCol(containerId, items, colType) {
           ${colType === 'ip'   ? `<button class="todo-btn reopen-btn" data-action="toopen" title="Zurück">←</button>` : ''}
           ${colType === 'ip'   ? `<button class="todo-btn done-btn" data-action="done" title="Erledigt">✓</button>` : ''}
           ${colType === 'done' ? `<button class="todo-btn reopen-btn" data-action="reopen" title="Wieder öffnen">↩</button>` : ''}
+          <button class="todo-btn agent-assign-btn" title="An Agent senden"
+            onclick="openTodoAgentModal(${todoJson})">🤖</button>
         </div>
       </div>
     </div>`;
@@ -533,8 +678,8 @@ function fillColGeneric(containerId, items, colType) {
   el.innerHTML = items.map(t => {
     const idx = renderedTodos.length;
     renderedTodos.push({ ...t, colType });
-    const proj = t.project ? t.project.replace(/-/g,' ') : (t.file ? t.file.replace('.md','') : '');
     const isDone = colType === 'done';
+    const todoJson = esc(JSON.stringify({ text: t.text, file: t.file, project: t.project }));
     return `<div class="todo-card" data-todo-idx="${idx}">
       <div class="todo-text${isDone ? ' done-text' : ''}">${esc(t.text)}</div>
       <div class="todo-meta">
@@ -546,6 +691,8 @@ function fillColGeneric(containerId, items, colType) {
           ${colType === 'ip'   ? `<button class="todo-btn reopen-btn" data-action="toopen" title="Zurück">←</button>` : ''}
           ${colType === 'ip'   ? `<button class="todo-btn done-btn" data-action="done" title="Erledigt">✓</button>` : ''}
           ${colType === 'done' ? `<button class="todo-btn reopen-btn" data-action="reopen" title="Wieder öffnen">↩</button>` : ''}
+          <button class="todo-btn agent-assign-btn" title="An Agent senden"
+            onclick="openTodoAgentModal(${todoJson})">🤖</button>
         </div>
       </div>
     </div>`;
@@ -555,11 +702,9 @@ function fillColGeneric(containerId, items, colType) {
 function openNewTodoModal() {
   // Pre-select current filter project
   const filterVal = document.getElementById('todos-filter')?.value || '';
-  const projectIds = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
   const sel = document.getElementById('todo-project');
   if (sel) {
-    sel.innerHTML = '<option value="__inbox__">📥 Inbox</option>' +
-      projectIds.map(p => `<option value="${esc(p)}">${esc(p.replace(/-/g,' '))}</option>`).join('');
+    sel.innerHTML = projectOptionsHtml(filterVal && filterVal !== '__inbox__' ? filterVal : '__inbox__', { includeInbox: true });
     sel.value = filterVal && filterVal !== '__inbox__' ? filterVal : '__inbox__';
   }
   // Set scope based on selected project
@@ -617,11 +762,7 @@ async function submitNewTodo() {
 }
 
 function projectSelectOptions(currentProject) {
-  const projectIds = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
-  return `<option value="__inbox__"${!currentProject ? ' selected' : ''}>📥 Inbox</option>` +
-    projectIds.map(p =>
-      `<option value="${esc(p)}"${p === currentProject ? ' selected' : ''}>${esc(p.replace(/-/g,' '))}</option>`
-    ).join('');
+  return projectOptionsHtml(currentProject || '__inbox__', { includeInbox: true });
 }
 
 async function assignTodo(selectEl) {
@@ -647,12 +788,9 @@ function renderAllTodos(filterProjectId = null) {
   // Sync filter dropdown — include Inbox if there are unassigned todos
   const sel = document.getElementById('todos-filter');
   if (sel) {
-    const projectIds = [...new Set(todos.map(t => t.project).filter(Boolean))].sort();
     const hasInbox = todos.some(t => !t.project);
     const cur = filterProjectId !== null ? filterProjectId : (sel.value || '');
-    sel.innerHTML = '<option value="">Alle Projekte</option>' +
-      (hasInbox ? '<option value="__inbox__">Inbox</option>' : '') +
-      projectIds.map(p => `<option value="${esc(p)}"${p === cur ? ' selected' : ''}>${esc(p.replace(/-/g,' '))}</option>`).join('');
+    sel.innerHTML = projectOptionsHtml(cur, { includeAll: true, includeInbox: hasInbox });
     sel.value = cur;
     filterProjectId = cur || null;
   }
@@ -694,18 +832,21 @@ function renderAllTodos(filterProjectId = null) {
   }
 
   el.innerHTML = Object.entries(groups).map(([groupKey, items]) => {
-    const title = groupKey === '__inbox__' ? 'Inbox' : groupKey.replace(/-/g,' ');
+    const title = groupKey === '__inbox__' ? 'Inbox' : projectDisplayName(groupKey);
     const open  = items.filter(t => t.status === 'open').length;
     return `<div class="todos-group">
       <div class="todos-group-title">${esc(title)} <span style="color:var(--overlay0);font-weight:400">${open} offen</span></div>
       ${items.map(t => {
         const isDone = t.status === 'done';
+        const todoJson = esc(JSON.stringify({ text: t.text, file: t.file, project: t.project }));
         return `<div class="todo-list-item${isDone ? ' done-item' : ''}">
           <span class="todo-check" data-file="${esc(t.file)}" data-text="${esc(t.text)}" data-status="${t.status}"
             title="${isDone ? 'Wieder öffnen' : 'Erledigt markieren'}">${isDone ? '☑' : '☐'}</span>
           <span class="todo-text-sm">${esc(t.text)}</span>
           <select class="list-assign-select" data-file="${esc(t.file)}" data-text="${esc(t.text)}" data-status="${t.status}"
             onchange="assignTodo(this)" title="Projekt zuweisen">${projectSelectOptions(t.project)}</select>
+          <button class="todo-btn agent-assign-btn" title="An Agent senden"
+            onclick="openTodoAgentModal(${todoJson})">🤖</button>
         </div>`;
       }).join('')}
     </div>`;
@@ -719,6 +860,527 @@ async function loadTaskHistory() {
     taskHistory = await r.json();
     renderTaskLog();
   } catch {}
+}
+
+// ── Mission Control ────────────────────────────────────────────────────────
+function defaultAgent() {
+  return agents.find(a => a.isDefault) || agents[0] || null;
+}
+
+let missionTasks = [];
+
+async function loadMissionTasks() {
+  try {
+    const r = await fetch('/api/mission/tasks');
+    missionTasks = await r.json();
+    renderMissionKanban();
+  } catch (e) {
+    console.error('Mission tasks load error:', e);
+  }
+}
+
+function renderMissionKanban() {
+  const queued  = missionTasks.filter(t => t.status === 'queued');
+  const running = missionTasks.filter(t => t.status === 'running');
+  const done    = missionTasks.filter(t => t.status === 'done' || t.status === 'error');
+
+  document.getElementById('mcount-queued').textContent  = queued.length;
+  document.getElementById('mcount-running').textContent = running.length;
+  document.getElementById('mcount-done').textContent    = done.length;
+  document.getElementById('mission-task-count').textContent = missionTasks.length;
+
+  const renderCard = (t) => {
+    const agent = agents.find(a => a.id === t.agent_id);
+    const agentDot  = agent ? `<span class="mc-agent-dot" style="background:${agent.color||'#6c7086'}"></span>` : '';
+    const agentName = agent ? `<span class="mc-agent-name">${esc(agent.name)}</span>` : '<span class="mc-agent-name" style="color:var(--overlay0)">Kein Agent</span>';
+    const ts = t.created_at ? new Date(t.created_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+    const desc = t.description ? `<div class="mc-desc">${esc(t.description)}</div>` : '';
+    const hasRun  = !!t.task_run_id;
+    const isRunning = t.status === 'running';
+    const titleClick = hasRun
+      ? `onclick="viewMissionOutput('${esc(t.agent_id)}','${esc(t.task_run_id)}')" style="cursor:pointer"`
+      : '';
+    const outputHint = hasRun
+      ? `<span class="mc-output-hint${isRunning ? ' mc-output-live' : ''}">${isRunning ? '● live' : '⊞ output'}</span>`
+      : '';
+    const runBtn = (t.status === 'queued' || t.status === 'error')
+      ? `<button class="mc-btn run" onclick="runMissionTask('${esc(t.id)}')">▶ Ausführen</button>`
+      : '';
+    const assignBtn = t.status !== 'running'
+      ? `<button class="mc-btn assign" onclick="autoAssignMissionTask('${esc(t.id)}')">🤖 Assign</button>`
+      : '';
+    const doneBtn = t.status === 'running'
+      ? `<button class="mc-btn" onclick="setMissionTaskStatus('${esc(t.id)}','done')">✓ Done</button>`
+      : '';
+    const errLabel = t.status === 'error' ? '<span class="mc-status-badge mc-err">Error</span>' : '';
+    return `<div class="mission-card priority-${t.priority||'medium'}">
+      <div class="mc-title" ${titleClick}>${esc(t.title)}${outputHint}</div>
+      ${desc}
+      <div class="mc-meta">${agentDot}${agentName}${errLabel}<span class="mc-time">${esc(ts)}</span></div>
+      <div class="mc-actions">
+        ${runBtn}${assignBtn}${doneBtn}
+        <button class="mc-btn del" onclick="deleteMissionTask('${esc(t.id)}')">🗑</button>
+      </div>
+    </div>`;
+  };
+
+  document.getElementById('mcards-queued').innerHTML  = queued.map(renderCard).join('') || '<div style="color:var(--overlay0);font-size:12px;padding:8px">Keine Tasks</div>';
+  document.getElementById('mcards-running').innerHTML = running.map(renderCard).join('') || '<div style="color:var(--overlay0);font-size:12px;padding:8px">Nichts läuft</div>';
+  document.getElementById('mcards-done').innerHTML    = done.slice(0, 20).map(renderCard).join('') || '<div style="color:var(--overlay0);font-size:12px;padding:8px">Noch nichts erledigt</div>';
+}
+
+function openNewMissionTaskModal() {
+  const sel     = document.getElementById('mt-agent');
+  const presetId = currentAgentId || defaultAgent()?.id;
+  if (sel) {
+    sel.innerHTML = '<option value="">— Kein Agent —</option>' +
+      agents.map(a => `<option value="${esc(a.id)}"${a.id === presetId ? ' selected' : ''}>${esc(a.name)}</option>`).join('');
+  }
+  document.getElementById('mt-title').value = '';
+  document.getElementById('mt-description').value = '';
+  document.getElementById('mt-err').style.display = 'none';
+  document.getElementById('mission-task-overlay').classList.remove('hidden');
+  setTimeout(() => document.getElementById('mt-title').focus(), 50);
+}
+
+function closeNewMissionTaskModal() {
+  document.getElementById('mission-task-overlay').classList.add('hidden');
+}
+
+async function submitNewMissionTask() {
+  const title       = document.getElementById('mt-title').value.trim();
+  const description = document.getElementById('mt-description').value.trim();
+  const agent_id    = document.getElementById('mt-agent').value || null;
+  const priority    = document.getElementById('mt-priority').value;
+  const err         = document.getElementById('mt-err');
+  if (!title) { err.textContent = 'Titel fehlt'; err.style.display = 'block'; return; }
+  err.style.display = 'none';
+  try {
+    await fetch('/api/mission/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description, agent_id, priority }),
+    });
+    closeNewMissionTaskModal();
+    loadMissionTasks();
+  } catch (e) {
+    err.textContent = `Fehler: ${e.message}`; err.style.display = 'block';
+  }
+}
+
+// ── Todo → Agent Modal ─────────────────────────────────────────────────────
+let _todoAgentPayload = null;
+
+function openTodoAgentModal(todo) {
+  _todoAgentPayload = todo;
+  document.getElementById('ta-title').textContent = todo.text;
+  document.getElementById('ta-description').value = '';
+  const sel      = document.getElementById('ta-agent');
+  const presetId = currentAgentId || defaultAgent()?.id;
+  sel.innerHTML  = agents.map(a =>
+    `<option value="${esc(a.id)}"${a.id === presetId ? ' selected' : ''}>${esc(a.name)}</option>`
+  ).join('');
+  document.getElementById('ta-err').style.display = 'none';
+  document.getElementById('todo-agent-overlay').classList.remove('hidden');
+}
+
+function closeTodoAgentModal() {
+  document.getElementById('todo-agent-overlay').classList.add('hidden');
+  _todoAgentPayload = null;
+}
+
+async function submitTodoAgent(runNow) {
+  if (!_todoAgentPayload) return;
+  const agent_id    = document.getElementById('ta-agent').value;
+  const description = document.getElementById('ta-description').value.trim();
+  const err         = document.getElementById('ta-err');
+  err.style.display = 'none';
+  try {
+    const r = await fetch('/api/mission/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title:       _todoAgentPayload.text,
+        description: description || `Vault-Todo: ${_todoAgentPayload.file || ''}`,
+        agent_id,
+        priority:    'medium',
+      }),
+    });
+    const task = await r.json();
+    closeTodoAgentModal();
+    if (runNow && task.id) {
+      // Switch to Mission Control so user sees progress
+      setView('mission');
+      await loadMissionTasks();
+      await runMissionTask(task.id);
+    } else {
+      setView('mission');
+      loadMissionTasks();
+    }
+  } catch (e) {
+    err.textContent = `Fehler: ${e.message}`;
+    err.style.display = 'block';
+  }
+}
+
+async function runMissionTask(id) {
+  const task = missionTasks.find(t => t.id === id);
+  if (!task) return;
+  if (!task.agent_id) {
+    const answer = confirm('Kein Agent zugewiesen. Auto-Assign starten?');
+    if (!answer) return;
+    await autoAssignMissionTask(id);
+    await loadMissionTasks();
+    const updated = missionTasks.find(t => t.id === id);
+    if (!updated?.agent_id) return;
+  }
+  try {
+    const r = await fetch(`/api/mission/tasks/${encodeURIComponent(id)}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await r.json();
+    if (data.taskId) {
+      currentAgentId = task.agent_id;
+      currentTaskId  = data.taskId;
+      setPanelMode('chat');
+      appendChatTurn(task.title, data.taskId);
+      streamOutput(task.agent_id, data.taskId);
+    }
+    setTimeout(loadMissionTasks, 500);
+  } catch (e) {
+    alert(`Fehler beim Starten: ${e.message}`);
+  }
+}
+
+async function autoAssignMissionTask(id) {
+  try {
+    const r = await fetch(`/api/mission/tasks/${encodeURIComponent(id)}/assign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await r.json();
+    await loadMissionTasks();
+    if (data.agent_name) {
+      console.log(`Auto-Assign: ${data.agent_name}`);
+    }
+  } catch (e) {
+    alert(`Auto-Assign Fehler: ${e.message}`);
+  }
+}
+
+async function setMissionTaskStatus(id, status) {
+  try {
+    await fetch(`/api/mission/tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    loadMissionTasks();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function deleteMissionTask(id) {
+  if (!confirm('Task wirklich löschen?')) return;
+  try {
+    await fetch(`/api/mission/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    loadMissionTasks();
+  } catch (e) {
+    alert(`Fehler: ${e.message}`);
+  }
+}
+
+function viewMissionOutput(agentId, taskRunId) {
+  if (!agentId || !taskRunId) return;
+  // Make sure the right agent is selected in the panel
+  if (agentId !== currentAgentId) selectAgent(agentId);
+  replayTask(agentId, taskRunId);
+}
+
+// ── Scheduler ─────────────────────────────────────────────────────────────
+let schedulerJobs    = [];
+let schedulerPresets = [];
+let _editJobId       = null;
+
+async function loadSchedulerJobs() {
+  try {
+    const [jobs, presets] = await Promise.all([
+      fetch('/api/scheduler/jobs').then(r => r.json()),
+      fetch('/api/scheduler/presets').then(r => r.json()),
+    ]);
+    schedulerJobs    = jobs;
+    schedulerPresets = presets;
+    renderSchedulerJobs();
+  } catch (e) { console.error('Scheduler load error:', e); }
+}
+
+function renderSchedulerJobs() {
+  const el = document.getElementById('scheduler-job-list');
+  if (!el) return;
+  document.getElementById('scheduler-job-count').textContent = schedulerJobs.length;
+
+  if (!schedulerJobs.length) {
+    el.innerHTML = '<div class="empty-state">Keine Jobs konfiguriert</div>';
+    return;
+  }
+
+  el.innerHTML = schedulerJobs.map(job => {
+    const agent   = agents.find(a => a.id === job.agent_id);
+    const enabled = job.enabled === 1;
+    const lastRun = job.last_run
+      ? new Date(job.last_run + 'Z').toLocaleString('de-DE', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })
+      : '—';
+    const statusColor = job.last_status === 'ok' ? 'var(--green)'
+      : job.last_status === 'error' ? 'var(--red)' : 'var(--overlay0)';
+    return `<div class="scheduler-job${enabled ? '' : ' job-disabled'}">
+      <div class="sj-header">
+        <span class="sj-name">${esc(job.name)}</span>
+        <code class="sj-cron">${esc(job.cron)}</code>
+        <div class="sj-actions">
+          <button class="mc-btn run" title="Jetzt ausführen" onclick="runJobNow('${esc(job.id)}')">▶</button>
+          <button class="mc-btn" title="Bearbeiten" onclick="openEditJobModal('${esc(job.id)}')">✎</button>
+          <label class="sj-toggle" title="${enabled ? 'Deaktivieren' : 'Aktivieren'}">
+            <input type="checkbox" ${enabled ? 'checked' : ''}
+              onchange="toggleJob('${esc(job.id)}', this.checked)">
+            <span class="sj-toggle-track"></span>
+          </label>
+          <button class="mc-btn del" title="Löschen" onclick="deleteJob('${esc(job.id)}')">🗑</button>
+        </div>
+      </div>
+      <div class="sj-meta">
+        <span style="color:${agent?.color||'#6c7086'}">● </span>
+        <span>${esc(agent?.name || job.agent_id)}</span>
+        <span class="sj-sep">·</span>
+        <span class="sj-prompt">${esc(job.prompt.length > 60 ? job.prompt.slice(0, 60) + '…' : job.prompt)}</span>
+        <span class="sj-sep">·</span>
+        <span>Letzter Run: <span style="color:${statusColor}">${esc(lastRun)}${job.last_status ? ` (${esc(job.last_status)})` : ''}</span></span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openNewJobModal() {
+  _editJobId = null;
+  document.getElementById('sj-modal-title').textContent = 'Neuer Job';
+  document.getElementById('sj-save-btn').textContent    = 'Erstellen';
+  document.getElementById('sj-name').value   = '';
+  document.getElementById('sj-prompt').value = '';
+  document.getElementById('sj-cron').value   = '';
+  document.getElementById('sj-err').style.display = 'none';
+
+  const agentSel = document.getElementById('sj-agent');
+  const presetId = currentAgentId || defaultAgent()?.id;
+  agentSel.innerHTML = agents.map(a =>
+    `<option value="${esc(a.id)}"${a.id === presetId ? ' selected' : ''}>${esc(a.name)}</option>`
+  ).join('');
+
+  const presetSel = document.getElementById('sj-preset');
+  presetSel.innerHTML = schedulerPresets.map((p, i) =>
+    `<option value="${i}">${esc(p.label)}</option>`
+  ).join('');
+  onJobPresetChange();
+
+  document.getElementById('scheduler-job-overlay').classList.remove('hidden');
+  setTimeout(() => document.getElementById('sj-name').focus(), 50);
+}
+
+function openEditJobModal(id) {
+  const job = schedulerJobs.find(j => j.id === id);
+  if (!job) return;
+  _editJobId = id;
+  document.getElementById('sj-modal-title').textContent = 'Job bearbeiten';
+  document.getElementById('sj-save-btn').textContent    = 'Speichern';
+  document.getElementById('sj-name').value   = job.name;
+  document.getElementById('sj-prompt').value = job.prompt;
+  document.getElementById('sj-cron').value   = job.cron;
+  document.getElementById('sj-err').style.display = 'none';
+
+  const agentSel = document.getElementById('sj-agent');
+  agentSel.innerHTML = agents.map(a =>
+    `<option value="${esc(a.id)}"${a.id === job.agent_id ? ' selected' : ''}>${esc(a.name)}</option>`
+  ).join('');
+
+  const presetSel = document.getElementById('sj-preset');
+  presetSel.innerHTML = schedulerPresets.map((p, i) =>
+    `<option value="${i}">${esc(p.label)}</option>`
+  ).join('');
+  // Select "Benutzerdefiniert" and show the cron field
+  const customIdx = schedulerPresets.findIndex(p => p.cron === '');
+  presetSel.value = customIdx >= 0 ? customIdx : 0;
+  document.getElementById('sj-cron-wrap').style.display = '';
+
+  document.getElementById('scheduler-job-overlay').classList.remove('hidden');
+}
+
+function closeNewJobModal() {
+  document.getElementById('scheduler-job-overlay').classList.add('hidden');
+  _editJobId = null;
+}
+
+function onJobPresetChange() {
+  const sel   = document.getElementById('sj-preset');
+  const wrap  = document.getElementById('sj-cron-wrap');
+  const cron  = document.getElementById('sj-cron');
+  const idx   = parseInt(sel.value, 10);
+  const preset = schedulerPresets[idx];
+  if (!preset) return;
+  if (preset.cron) {
+    cron.value = preset.cron;
+    wrap.style.display = 'none';
+  } else {
+    wrap.style.display = '';
+    cron.focus();
+  }
+}
+
+async function saveJob() {
+  const name     = document.getElementById('sj-name').value.trim();
+  const cronExpr = document.getElementById('sj-cron').value.trim();
+  const agent_id = document.getElementById('sj-agent').value;
+  const prompt   = document.getElementById('sj-prompt').value.trim();
+  const err      = document.getElementById('sj-err');
+  err.style.display = 'none';
+
+  if (!name || !cronExpr || !agent_id || !prompt) {
+    err.textContent = 'Alle Felder sind Pflicht.';
+    err.style.display = 'block';
+    return;
+  }
+
+  try {
+    const method = _editJobId ? 'PATCH' : 'POST';
+    const url    = _editJobId
+      ? `/api/scheduler/jobs/${encodeURIComponent(_editJobId)}`
+      : '/api/scheduler/jobs';
+    const r = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, cron: cronExpr, agent_id, prompt }),
+    });
+    const data = await r.json();
+    if (!r.ok) { err.textContent = data.error; err.style.display = 'block'; return; }
+    closeNewJobModal();
+    loadSchedulerJobs();
+  } catch (e) {
+    err.textContent = `Fehler: ${e.message}`; err.style.display = 'block';
+  }
+}
+
+async function toggleJob(id, enabled) {
+  await fetch(`/api/scheduler/jobs/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  loadSchedulerJobs();
+}
+
+async function deleteJob(id) {
+  if (!confirm('Job wirklich löschen?')) return;
+  await fetch(`/api/scheduler/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  loadSchedulerJobs();
+}
+
+async function runJobNow(id) {
+  await fetch(`/api/scheduler/jobs/${encodeURIComponent(id)}/run`, { method: 'POST' });
+  setTimeout(loadSchedulerJobs, 3000);
+}
+
+// ── Telegram ───────────────────────────────────────────────────────────────
+let telegramAutoRefresh  = null;
+let telegramAgentFilter  = null;
+
+function renderTelegramNav() {
+  const el = document.getElementById('telegram-nav-entries');
+  if (!el) return;
+  const tgAgents = agents.filter(a => a.telegramToken);
+  if (!tgAgents.length) {
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = tgAgents.map(a => {
+    const isActive = telegramAgentFilter === a.id;
+    return `<a class="nav-link${isActive ? ' active' : ''}" data-view="telegram" data-agent="${esc(a.id)}"
+               onclick="selectTelegramAgent('${esc(a.id)}')">
+      <span style="display:inline-block;width:7px;height:7px;border-radius:50%;
+                   background:${a.color||'#6c7086'};margin-right:6px;vertical-align:middle;flex-shrink:0"></span>
+      ${esc(a.name)}
+    </a>`;
+  }).join('');
+}
+
+function selectTelegramAgent(agentId) {
+  telegramAgentFilter = agentId;
+  renderTelegramNav();
+  setView('telegram');
+}
+
+async function loadTelegramMessages() {
+  try {
+    const agentParam = telegramAgentFilter ? `&agent_id=${encodeURIComponent(telegramAgentFilter)}` : '';
+    const [msgRes, statusRes] = await Promise.all([
+      fetch(`/api/telegram/messages?limit=100${agentParam}`),
+      fetch('/api/telegram/status'),
+    ]);
+    const messages = await msgRes.json();
+    const status   = await statusRes.json();
+    renderTelegramLog(messages, status);
+
+    clearInterval(telegramAutoRefresh);
+    telegramAutoRefresh = setInterval(async () => {
+      if (!document.getElementById('view-telegram').classList.contains('hidden')) {
+        const r = await fetch(`/api/telegram/messages?limit=100${agentParam}`);
+        const s = await fetch('/api/telegram/status');
+        renderTelegramLog(await r.json(), await s.json());
+      } else {
+        clearInterval(telegramAutoRefresh);
+      }
+    }, 5000);
+  } catch {}
+}
+
+function renderTelegramLog(messages, status) {
+  const bots   = status.activeBots || [];
+  const stText = document.getElementById('telegram-status-text');
+  const count  = document.getElementById('telegram-msg-count');
+  const agent  = agents.find(a => a.id === telegramAgentFilter);
+
+  if (stText) {
+    const label = agent ? esc(agent.name) : `${bots.length} Bot${bots.length !== 1 ? 's' : ''}`;
+    stText.textContent = bots.length ? `🟢 ${label} aktiv` : '⚪ Kein Bot aktiv';
+  }
+  if (count) count.textContent = status.total_messages || '';
+
+  const el = document.getElementById('telegram-chat-log');
+  if (!el) return;
+
+  if (!messages.length) {
+    el.innerHTML = '<div class="empty-state">Noch keine Telegram-Nachrichten</div>';
+    return;
+  }
+
+  el.innerHTML = messages.map(m => {
+    const isIn   = m.direction === 'in';
+    const time   = m.created_at ? new Date(m.created_at + 'Z').toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
+    const agent  = agents.find(a => a.id === m.from_user);
+    const color  = agent?.color || (isIn ? '#a6e3a1' : '#89b4fa');
+    return `<div class="tg-msg ${isIn ? 'tg-in' : 'tg-out'}">
+      <div class="tg-bubble">
+        <div class="tg-meta">
+          <span class="tg-sender" style="color:${color}">${isIn ? esc(m.from_user) : esc(m.from_user)}</span>
+          <span class="tg-time">${time}</span>
+        </div>
+        <div class="tg-text">${esc(m.text)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Scroll to bottom
+  el.scrollTop = el.scrollHeight;
 }
 
 function renderTaskLog() {
@@ -877,7 +1539,7 @@ function streamOutput(agentId, taskId) {
       setStatus('');
       loadAgents();
       loadRecentTasks();
-      setTimeout(() => { loadProjects(); loadTodos(); }, 800);
+      setTimeout(refreshVaultData, 800);
     }
   };
   sseSource.onerror = () => {
@@ -948,13 +1610,16 @@ function setView(view) {
   );
   const target = document.getElementById(`view-${view}`);
   if (target) target.classList.remove('hidden');
-  if (view === 'log')     loadTaskHistory();
-  if (view === 'skills')  loadSkills();
-  if (view === 'plugins') loadPlugins();
+  if (view === 'log')      loadTaskHistory();
+  if (view === 'skills')   loadSkills();
+  if (view === 'plugins')  loadPlugins();
   if (view === 'claudemd') loadClaudemdView();
-  if (view === 'trash')   loadTrash();
-  if (view === 'wiki')    initWikiView();
-  if (view === 'graph')   showGraphView();
+  if (view === 'trash')    loadTrash();
+  if (view === 'wiki')     initWikiView();
+  if (view === 'graph')    showGraphView();
+  if (view === 'telegram')  loadTelegramMessages();
+  if (view === 'mission')   loadMissionTasks();
+  if (view === 'scheduler') loadSchedulerJobs();
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -992,7 +1657,7 @@ async function saveConfig() {
     config = await r.json();
     msg.className = ''; msg.textContent = 'Gespeichert ✓';
     setTimeout(() => { msg.textContent = ''; }, 2000);
-    loadProjects(); loadTodos();
+    await refreshVaultData();
   } catch (e) {
     msg.className = 'error'; msg.textContent = `Fehler: ${e.message}`;
   }
@@ -1001,15 +1666,228 @@ async function saveConfig() {
 function renderAgentsConfig() {
   const el = document.getElementById('agents-config-list');
   if (!agents.length) { el.innerHTML = '<div class="empty-state" style="padding:12px 0">Keine Agenten</div>'; return; }
-  el.innerHTML = agents.map(a => `
-    <div class="agent-cfg-item">
-      <span class="agent-cfg-dot" style="background:${a.color||'#6c7086'}"></span>
-      <div class="agent-cfg-info">
-        <div class="agent-cfg-name">${esc(a.name)}</div>
-        <div class="agent-cfg-cmd">${esc(a.command)} ${(a.args||[]).join(' ')}</div>
+  el.innerHTML = agents.map(a => {
+    const hasToken = !!a.telegramToken;
+    const safeId   = esc(a.id);
+    return `
+    <div class="agent-cfg-wrapper" id="agent-cfg-wrapper-${safeId}">
+      <div class="agent-cfg-item">
+        <span class="agent-cfg-dot" style="background:${a.color||'#6c7086'}"></span>
+        <div class="agent-cfg-info">
+          <div class="agent-cfg-name">
+            ${esc(a.name)}
+            ${hasToken ? '<span class="telegram-badge" title="Telegram Bot konfiguriert">🤖</span>' : ''}
+            ${a.isDefault ? '<span class="agent-default-badge" title="Standard-Agent">★</span>' : ''}
+          </div>
+          <div class="agent-cfg-cmd">${esc(a.command)} ${(a.args||[]).join(' ')}</div>
+        </div>
+        <button class="btn-secondary btn-sm" onclick="toggleAgentEdit('${safeId}')">Bearbeiten</button>
+        <button class="agent-cfg-del" onclick="deleteAgent('${safeId}')" title="Löschen">✕</button>
       </div>
-      <button class="agent-cfg-del" onclick="deleteAgent('${esc(a.id)}')" title="Löschen">✕</button>
-    </div>`).join('');
+      <div class="agent-edit-form hidden" id="agent-edit-form-${safeId}">
+        <div class="agent-edit-grid">
+          <div class="config-field">
+            <label>Template</label>
+            <select id="ae-template-${safeId}" class="config-input" onchange="onAgentTemplateChange('${safeId}')">
+              ${Object.entries(AGENT_TEMPLATES).map(([k,t]) =>
+                `<option value="${k}"${detectTemplate(a.command) === k ? ' selected' : ''}>${esc(t.label)}</option>`
+              ).join('')}
+            </select>
+          </div>
+          <div class="config-field" id="ae-model-wrap-${safeId}"
+               style="${AGENT_TEMPLATES[detectTemplate(a.command)]?.models?.length ? '' : 'display:none'}">
+            <label>Modell</label>
+            <select id="ae-model-${safeId}" class="config-input" onchange="onAgentModelChange('${safeId}')">
+              ${modelOptionsHtml(detectTemplate(a.command), (a.args||[]).join(' '))}
+            </select>
+          </div>
+          <div class="config-field">
+            <label>Name</label>
+            <input id="ae-name-${safeId}" class="config-input" value="${esc(a.name)}">
+          </div>
+          <div class="config-field">
+            <label>Farbe</label>
+            <input id="ae-color-${safeId}" class="config-input" value="${esc(a.color||'#89b4fa')}" style="width:120px">
+          </div>
+          <div class="config-field">
+            <label>Befehl</label>
+            <input id="ae-command-${safeId}" class="config-input" value="${esc(a.command)}">
+          </div>
+          <div class="config-field">
+            <label>Args</label>
+            <input id="ae-args-${safeId}" class="config-input" value="${esc((a.args||[]).join(' '))}">
+          </div>
+          <div class="config-field agent-edit-full">
+            <label>Arbeitsverzeichnis</label>
+            <input id="ae-workdir-${safeId}" class="config-input" value="${esc(a.workDir||'')}">
+          </div>
+          <div class="config-field agent-edit-full">
+            <label class="agent-default-label">
+              <input type="checkbox" id="ae-default-${safeId}" ${a.isDefault ? 'checked' : ''}>
+              Standard-Agent (wird bei neuen Tasks vorausgewählt)
+            </label>
+          </div>
+          <div class="config-field agent-edit-full agent-telegram-field">
+            <label>🤖 Telegram Bot Token</label>
+            <div class="token-input-wrap">
+              <input id="ae-telegram-${safeId}" type="password" class="config-input"
+                value="${esc(a.telegramToken||'')}"
+                placeholder="123456789:ABCdefGhIjKlMnOpQrStUvWxYz"
+                autocomplete="new-password">
+              <button class="icon-btn token-eye-btn" type="button"
+                onclick="toggleTokenVisibility('${safeId}')" title="Token anzeigen/verbergen">👁</button>
+            </div>
+            <span class="field-hint">Von @BotFather. Leer lassen um Telegram für diesen Agent zu deaktivieren. Server-Neustart nötig nach Änderung.</span>
+          </div>
+        </div>
+        <div class="agent-edit-actions">
+          <button class="btn-primary" onclick="saveAgentEdit('${safeId}')">Speichern</button>
+          <button class="btn-secondary" onclick="toggleAgentEdit('${safeId}')">Abbrechen</button>
+          <span class="agent-edit-msg" id="ae-msg-${safeId}"></span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleAgentEdit(id) {
+  const form = document.getElementById(`agent-edit-form-${id}`);
+  if (!form) return;
+  // Close all others first
+  document.querySelectorAll('.agent-edit-form').forEach(el => {
+    if (el.id !== `agent-edit-form-${id}`) el.classList.add('hidden');
+  });
+  form.classList.toggle('hidden');
+}
+
+function toggleTokenVisibility(id) {
+  const input = document.getElementById(`ae-telegram-${id}`);
+  if (!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+async function saveAgentEdit(id) {
+  const v = suffix => document.getElementById(`ae-${suffix}-${id}`)?.value.trim() || '';
+  const msg = document.getElementById(`ae-msg-${id}`);
+  const agent = agents.find(a => a.id === id);
+  if (!agent) return;
+
+  const isDefault = document.getElementById(`ae-default-${id}`)?.checked ?? false;
+  const updated = {
+    ...agent,
+    name:      v('name')    || agent.name,
+    command:   v('command') || agent.command,
+    args:      v('args') ? v('args').split(/\s+/) : [],
+    workDir:   v('workdir') || undefined,
+    color:     v('color')   || '#89b4fa',
+    isDefault,
+  };
+  const token = v('telegram');
+  if (token) updated.telegramToken = token;
+  else delete updated.telegramToken;
+
+  try {
+    // If this agent is being set as default, clear the flag on all others first
+    if (isDefault) {
+      const cfg = await fetch('/api/config').then(r => r.json());
+      for (const a of (cfg.agents || [])) {
+        if (a.id !== id && a.isDefault) {
+          await fetch('/api/agents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...a, isDefault: false }),
+          });
+        }
+      }
+    }
+    await fetch('/api/agents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    });
+    await loadAgents();
+    renderAgentsConfig();
+    if (msg) {
+      msg.textContent = token ? '✓ Gespeichert — Server-Neustart für Telegram nötig' : '✓ Gespeichert';
+      msg.style.color = 'var(--green)';
+      // Re-open the form so the message is visible briefly, then collapse
+      document.getElementById(`agent-edit-form-${id}`)?.classList.remove('hidden');
+      setTimeout(() => document.getElementById(`agent-edit-form-${id}`)?.classList.add('hidden'), 2500);
+    }
+  } catch (e) {
+    if (msg) { msg.textContent = `Fehler: ${e.message}`; msg.style.color = 'var(--red)'; }
+  }
+}
+
+function onAgentTemplateChange(id) {
+  const key = document.getElementById(`ae-template-${id}`)?.value;
+  const tpl = AGENT_TEMPLATES[key];
+
+  // Modell-Dropdown aktualisieren
+  const modelWrap = document.getElementById(`ae-model-wrap-${id}`);
+  const modelSel  = document.getElementById(`ae-model-${id}`);
+  const hasModels = tpl?.models?.length > 0;
+  if (modelWrap) modelWrap.style.display = hasModels ? '' : 'none';
+  if (modelSel && hasModels) {
+    modelSel.innerHTML = tpl.models.map(m =>
+      `<option value="${esc(m.id)}">${esc(m.label)}</option>`
+    ).join('');
+  }
+
+  if (!tpl || key === 'custom') return;
+  const set = (field, val) => { const el = document.getElementById(`ae-${field}-${id}`); if (el) el.value = val; };
+  set('command', tpl.command);
+  set('args',    tpl.args);
+}
+
+function onAgentModelChange(id) {
+  const key     = document.getElementById(`ae-template-${id}`)?.value;
+  const modelId = document.getElementById(`ae-model-${id}`)?.value;
+  const tpl     = AGENT_TEMPLATES[key];
+  if (!tpl?.models) return;
+  const model = tpl.models.find(m => m.id === modelId);
+  if (!model) return;
+  const argsEl = document.getElementById(`ae-args-${id}`);
+  if (argsEl) argsEl.value = model.args;
+}
+
+function onNewAgentTemplate() {
+  const key = document.getElementById('new-agent-template')?.value;
+  const tpl = AGENT_TEMPLATES[key];
+
+  // Modell-Dropdown aktualisieren
+  const modelWrap = document.getElementById('new-agent-model-wrap');
+  const modelSel  = document.getElementById('new-agent-model');
+  const hasModels = tpl?.models?.length > 0;
+  if (modelWrap) modelWrap.style.display = hasModels ? '' : 'none';
+  if (modelSel && hasModels) {
+    modelSel.innerHTML = tpl.models.map(m =>
+      `<option value="${esc(m.id)}">${esc(m.label)}</option>`
+    ).join('');
+  }
+
+  if (!tpl || key === 'custom') {
+    ['new-agent-command','new-agent-args','new-agent-color'].forEach(elId => {
+      const el = document.getElementById(elId);
+      if (el) el.value = '';
+    });
+    return;
+  }
+  const set = (elId, val) => { const el = document.getElementById(elId); if (el) el.value = val; };
+  set('new-agent-command', tpl.command);
+  set('new-agent-args',    tpl.args);
+  set('new-agent-color',   tpl.color);
+}
+
+function onNewAgentModel() {
+  const key     = document.getElementById('new-agent-template')?.value;
+  const modelId = document.getElementById('new-agent-model')?.value;
+  const tpl     = AGENT_TEMPLATES[key];
+  if (!tpl?.models) return;
+  const model = tpl.models.find(m => m.id === modelId);
+  if (!model) return;
+  const argsEl = document.getElementById('new-agent-args');
+  if (argsEl) argsEl.value = model.args;
 }
 
 async function deleteAgent(id) {
@@ -1470,8 +2348,9 @@ function dur(start, end) {
 
 // ── Skills ─────────────────────────────────────────────────────────────────
 async function loadSkills() {
+  const agentParam = currentAgentId ? `?agentId=${encodeURIComponent(currentAgentId)}` : '';
   try {
-    const r = await fetch('/api/skills');
+    const r = await fetch(`/api/skills${agentParam}`);
     skills = await r.json();
     renderSkillCards();
   } catch {}
@@ -1487,14 +2366,19 @@ function renderSkillCards() {
     grid.innerHTML = '<div class="empty-state">Keine Skills gefunden. Vault-Pfad korrekt konfiguriert?</div>';
     return;
   }
-  grid.innerHTML = skills.map(s => `
-    <div class="skill-card" onclick="openSkill('${esc(s.id)}')">
+  grid.innerHTML = skills.map(s => {
+    const scopeBadge = s.scope === 'agent'
+      ? '<span style="font-size:10px;color:var(--mauve);margin-left:4px">agent</span>'
+      : s.scope === 'global'
+        ? '<span style="font-size:10px;color:var(--overlay0);margin-left:4px">global</span>'
+        : '';
+    return `<div class="skill-card" onclick="openSkill('${esc(s.id)}')">
       <div class="skill-card-accent"></div>
-      <div class="skill-card-name">${esc(s.name)}</div>
+      <div class="skill-card-name">${esc(s.name)}${scopeBadge}</div>
       <div class="skill-card-desc">${esc(s.description || '—')}</div>
       <button class="skill-card-delete" onclick="deleteSkill('${esc(s.id)}',event)" title="In Papierkorb verschieben">🗑</button>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function openSkill(id) {
@@ -1618,15 +2502,29 @@ let pluginsData    = { installed: [], available: [] };
 let pluginsFiltered = [];
 
 async function loadPlugins() {
-  const loadEl = document.getElementById('plugins-loading');
-  const grid   = document.getElementById('plugins-grid');
+  const loadEl  = document.getElementById('plugins-loading');
+  const grid    = document.getElementById('plugins-grid');
+  const banner  = document.getElementById('plugins-not-supported');
   if (loadEl) { loadEl.style.display = ''; grid.innerHTML = ''; }
+  if (banner)  banner.classList.add('hidden');
 
+  const agentParam = currentAgentId ? `?agentId=${encodeURIComponent(currentAgentId)}` : '';
   try {
-    const r = await fetch('/api/plugins');
+    const r = await fetch(`/api/plugins${agentParam}`);
     pluginsData = await r.json();
   } catch {
     pluginsData = { installed: [], available: [] };
+  }
+
+  if (pluginsData.notSupported) {
+    if (loadEl) loadEl.style.display = 'none';
+    if (banner) {
+      banner.textContent = `Plugins werden von „${pluginsData.agentName || 'diesem Agent'}" nicht unterstützt (nur Claude Code).`;
+      banner.classList.remove('hidden');
+    }
+    pluginsFiltered = [];
+    renderPluginCards();
+    return;
   }
 
   pluginsFiltered = pluginsData.available || [];
@@ -1820,8 +2718,11 @@ function loadClaudemdView() {
   sel.innerHTML = agentsWithDir.map(a =>
     `<option value="${esc(a.id)}">${esc(a.name)}</option>`
   ).join('');
-  const id = claudemdAgentId && agentsWithDir.find(a => a.id === claudemdAgentId)
-    ? claudemdAgentId : agentsWithDir[0].id;
+  const preferred = currentAgentId && agentsWithDir.find(a => a.id === currentAgentId)
+    ? currentAgentId
+    : claudemdAgentId && agentsWithDir.find(a => a.id === claudemdAgentId)
+      ? claudemdAgentId : agentsWithDir[0].id;
+  const id = preferred;
   sel.value = id;
   loadClaudemd(id);
 }
@@ -1844,11 +2745,15 @@ async function loadClaudemd(agentId) {
   try {
     const r    = await fetch(`/api/claudemd?agentId=${encodeURIComponent(agentId)}`);
     const data = await r.json();
+    const filename = data.filename || 'CLAUDE.md';
+    // Update section label to show which file is being edited
+    const label = document.querySelector('#view-claudemd .section-label');
+    if (label) label.textContent = filename;
     noAgent.classList.add('hidden');
     editor.value = data.content || '';
     preview.innerHTML = data.content
       ? marked.parse(data.content)
-      : '<div class="empty-state" style="padding:32px 0">Noch keine CLAUDE.md vorhanden — klicke auf „Bearbeiten" um eine zu erstellen.</div>';
+      : `<div class="empty-state" style="padding:32px 0">Noch keine ${esc(filename)} vorhanden — klicke auf „Bearbeiten" um eine zu erstellen.</div>`;
     preview.classList.remove('hidden');
     editor.classList.add('hidden');
     btnMode.textContent = 'Bearbeiten';
@@ -1874,9 +2779,10 @@ function toggleClaudemdEdit() {
     btnSave.classList.remove('hidden');
   } else {
     const val = editor.value;
+    const lbl = document.querySelector('#view-claudemd .section-label')?.textContent || 'CLAUDE.md';
     preview.innerHTML = val
       ? marked.parse(val)
-      : '<div class="empty-state" style="padding:32px 0">Noch keine CLAUDE.md vorhanden.</div>';
+      : `<div class="empty-state" style="padding:32px 0">Noch keine ${esc(lbl)} vorhanden.</div>`;
     preview.classList.remove('hidden');
     editor.classList.add('hidden');
     btnMode.textContent = 'Bearbeiten';
@@ -1910,8 +2816,9 @@ async function saveClaudemd() {
 
 // ── Slash Commands ──────────────────────────────────────────────────────────
 async function loadCommands() {
+  const agentParam = currentAgentId ? `?agentId=${encodeURIComponent(currentAgentId)}` : '';
   try {
-    const r = await fetch('/api/commands');
+    const r = await fetch(`/api/commands${agentParam}`);
     commands = await r.json();
     renderCommandCards();
   } catch {}
@@ -2165,7 +3072,7 @@ async function loadFile(relPath) {
 
   const parts = relPath.split('/');
   setBreadcrumbWiki(parts.map((p, i) => ({
-    label: p.replace(/\.md$/, '').replace(/-/g, ' '),
+    label: p.replace(/\.(md|base)$/, '').replace(/-/g, ' '),
     path:  i === parts.length - 1 ? relPath : null,
   })));
   highlightWikiNav(relPath);
@@ -2178,11 +3085,11 @@ async function loadFile(relPath) {
     body.innerHTML = buildFmBar(frontmatter || {}, relPath, readonly) + (html || '');
 
     // Wire up wikilink click handlers
-    body.querySelectorAll('a.wikilink').forEach(a => {
-      a.addEventListener('click', e => {
+    body.querySelectorAll('.wikilink[data-path], .embed-link[data-path]').forEach(el => {
+      el.addEventListener('click', e => {
         e.preventDefault();
-        const href = a.getAttribute('href');
-        if (href) loadAny(href);
+        const target = el.dataset.path || el.getAttribute('href');
+        if (target) loadAny(target);
       });
     });
 
@@ -2313,7 +3220,7 @@ function renderNavTree(items, depth) {
         <ul style="list-style:none;padding:0;margin:0" class="hidden">${childHtml}</ul>
       </li>`;
     }
-    const title    = item.frontmatter?.title || item.name.replace(/\.(md|pdf)$/, '').replace(/-/g, ' ');
+    const title    = item.frontmatter?.title || item.name.replace(/\.(md|pdf|base)$/, '').replace(/-/g, ' ');
     const dotColor = item.frontmatter?.status ? statusColor(item.frontmatter.status) : 'var(--surface2)';
     // Files: base indent + 8 padding + 14px for the dot area
     const fileIndent = baseIndent + 8;

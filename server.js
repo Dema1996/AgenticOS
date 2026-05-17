@@ -1,10 +1,14 @@
 'use strict';
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const matter = require('gray-matter');
+const db = require('./db');
+const { setupTelegram, getActiveBots, updateBotName } = require('./telegram');
+const { setupScheduler, reloadJob, unscheduleJob, runJobNow: runJobById, PRESETS, getActiveJobIds } = require('./scheduler');
 
 const app = express();
 app.use(express.json());
@@ -67,8 +71,10 @@ app.get('/lib/sortable.min.js', (_req, res) =>
 app.get('/api/config', (_req, res) => res.json(readConfig()));
 
 app.post('/api/config', (req, res) => {
-  const merged = { ...readConfig(), ...req.body };
+  const current = readConfig();
+  const merged = { ...current, ...req.body };
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2));
+  if (merged.vaultPath !== current.vaultPath) invalidateWikilinkCache();
   res.json(merged);
 });
 
@@ -86,9 +92,14 @@ app.post('/api/agents', (req, res) => {
   const cfg = readConfig();
   const agent = req.body;
   if (!agent.id || !agent.command) return res.status(400).json({ error: 'id and command required' });
+  const existing = cfg.agents.find(a => a.id === agent.id);
   cfg.agents = cfg.agents.filter(a => a.id !== agent.id);
   cfg.agents.push(agent);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+  // Telegram Bot-Name synchronisieren wenn Agent umbenannt wurde
+  if (existing && agent.name && existing.name !== agent.name) {
+    updateBotName(agent.id, agent.name).catch(() => {});
+  }
   res.json(agent);
 });
 
@@ -356,6 +367,7 @@ app.post('/api/todos', (req, res) => {
         tags: tagList,
       }));
     }
+    invalidateWikilinkCache();
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -418,6 +430,7 @@ app.patch('/api/todos', (req, res) => {
           fs.writeFileSync(fullPath, raw);
         }
       }
+      invalidateWikilinkCache();
       return res.json({ ok: true });
     }
 
@@ -436,6 +449,7 @@ app.patch('/api/todos', (req, res) => {
         : raw.replace(new RegExp(`^(- )\\[x\\] (${escaped})`, 'im'), '$1[ ] $2');
       fs.writeFileSync(fullPath, raw);
     }
+    invalidateWikilinkCache();
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -443,26 +457,46 @@ app.patch('/api/todos', (req, res) => {
 });
 
 // ── Skills ────────────────────────────────────────────────────────────────────
-app.get('/api/skills', (_req, res) => {
-  const { vaultPath } = readConfig();
-  if (!vaultPath) return res.json([]);
-  const dir = path.join(vaultPath, '.claude', 'skills');
+function readSkillsFromDir(dir, scope) {
+  const skills = [];
   try {
-    const skills = fs.readdirSync(dir)
-      .filter(f => {
-        try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; }
-      })
-      .map(id => {
-        try {
-          const raw = fs.readFileSync(path.join(dir, id, 'SKILL.md'), 'utf8');
-          const { data } = matter(raw);
-          return { id, name: data.name || id, description: data.description || '', content: raw };
-        } catch {
-          return { id, name: id, description: '', content: '' };
-        }
-      });
-    res.json(skills);
-  } catch { res.json([]); }
+    for (const id of fs.readdirSync(dir).filter(f => {
+      try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; }
+    })) {
+      try {
+        const raw = fs.readFileSync(path.join(dir, id, 'SKILL.md'), 'utf8');
+        const { data } = matter(raw);
+        skills.push({ id, name: data.name || id, description: data.description || '', content: raw, scope });
+      } catch {
+        skills.push({ id, name: id, description: '', content: '', scope });
+      }
+    }
+  } catch {}
+  return skills;
+}
+
+app.get('/api/skills', (req, res) => {
+  const { vaultPath, agents = [] } = readConfig();
+  const agent = agents.find(a => a.id === req.query.agentId);
+  const agentDir = agent?.workDir ? path.join(agent.workDir, '.claude', 'skills') : null;
+
+  // Agent-local skills take priority; global vault skills are additive
+  const seen   = new Set();
+  const skills = [];
+  if (agentDir) {
+    for (const s of readSkillsFromDir(agentDir, 'agent')) {
+      seen.add(s.id); skills.push(s);
+    }
+  }
+  if (vaultPath) {
+    const vaultDir = path.join(vaultPath, '.claude', 'skills');
+    if (!agentDir || path.resolve(agentDir) !== path.resolve(vaultDir)) {
+      for (const s of readSkillsFromDir(vaultDir, 'global')) {
+        if (!seen.has(s.id)) skills.push(s);
+      }
+    }
+  }
+  res.json(skills);
 });
 
 app.get('/api/skills/:id', (req, res) => {
@@ -526,18 +560,23 @@ app.delete('/api/skills/:id', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── CLAUDE.md (per agent workDir) ─────────────────────────────────────────────
+// ── CLAUDE.md / AGENTS.md (per agent workDir) ────────────────────────────────
+function agentInstructionFile(agent) {
+  return agent.command === 'claude' ? 'CLAUDE.md' : 'AGENTS.md';
+}
+
 app.get('/api/claudemd', (req, res) => {
   const { agentId } = req.query;
   const { agents = [] } = readConfig();
   const agent = agents.find(a => a.id === agentId);
   if (!agent?.workDir) return res.status(404).json({ error: 'Agent oder Arbeitsverzeichnis nicht gefunden' });
-  const filePath = path.join(agent.workDir, 'CLAUDE.md');
+  const filename = agentInstructionFile(agent);
+  const filePath = path.join(agent.workDir, filename);
   try {
     const content = fs.readFileSync(filePath, 'utf8');
-    res.json({ content, exists: true, agentId, workDir: agent.workDir });
+    res.json({ content, exists: true, agentId, workDir: agent.workDir, filename });
   } catch {
-    res.json({ content: '', exists: false, agentId, workDir: agent.workDir });
+    res.json({ content: '', exists: false, agentId, workDir: agent.workDir, filename });
   }
 });
 
@@ -547,17 +586,23 @@ app.put('/api/claudemd', (req, res) => {
   const agent = agents.find(a => a.id === agentId);
   if (!agent?.workDir) return res.status(404).json({ error: 'Agent oder Arbeitsverzeichnis nicht gefunden' });
   if (req.body.content === undefined) return res.status(400).json({ error: 'content required' });
+  const filename = agentInstructionFile(agent);
   try {
-    const filePath = safePath(agent.workDir, 'CLAUDE.md');
+    const filePath = safePath(agent.workDir, filename);
     fs.writeFileSync(filePath, req.body.content, 'utf8');
-    res.json({ ok: true });
+    res.json({ ok: true, filename });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
 // ── Plugins ───────────────────────────────────────────────────────────────────
-app.get('/api/plugins', (_req, res) => {
+app.get('/api/plugins', (req, res) => {
+  const { agents = [] } = readConfig();
+  const agent = agents.find(a => a.id === req.query.agentId);
+  if (agent && agent.command !== 'claude') {
+    return res.json({ installed: [], available: [], notSupported: true, agentName: agent.name });
+  }
   const proc = spawn('claude', ['plugin', 'list', '--json', '--available'], {
     env: process.env,
   });
@@ -617,16 +662,25 @@ app.post('/api/plugins/uninstall', (req, res) => {
 // ── Slash Commands ────────────────────────────────────────────────────────────
 const USER_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
 
-function readCommandDirs() {
-  const { vaultPath } = readConfig();
+function readCommandDirs(agentId) {
+  const { vaultPath, agents = [] } = readConfig();
+  const agent = agents.find(a => a.id === agentId);
   const dirs = [{ dir: USER_COMMANDS_DIR, scope: 'global' }];
-  if (vaultPath) dirs.push({ dir: path.join(vaultPath, '.claude', 'commands'), scope: 'vault' });
+  if (agent?.workDir) {
+    const agentCmdsDir = path.join(agent.workDir, '.claude', 'commands');
+    dirs.push({ dir: agentCmdsDir, scope: 'agent' });
+  }
+  if (vaultPath) {
+    const vaultCmdsDir = path.join(vaultPath, '.claude', 'commands');
+    const alreadyAdded = dirs.some(d => path.resolve(d.dir) === path.resolve(vaultCmdsDir));
+    if (!alreadyAdded) dirs.push({ dir: vaultCmdsDir, scope: 'vault' });
+  }
   return dirs;
 }
 
-app.get('/api/commands', (_req, res) => {
+app.get('/api/commands', (req, res) => {
   const commands = [];
-  for (const { dir, scope } of readCommandDirs()) {
+  for (const { dir, scope } of readCommandDirs(req.query.agentId)) {
     try {
       for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.md'))) {
         try {
@@ -800,13 +854,65 @@ app.post('/api/exec', (req, res) => {
 const { marked } = require('marked');
 marked.use({ gfm: true });
 
+const WIKILINK_SCAN_DIRS = ['projects', 'todos', 'notizen', 'wiki', 'entities', 'raw'];
+const WIKILINK_FILE_EXTENSIONS = ['.md', '.base'];
 let _wikilinkCache = null;
+
+function isWikilinkIndexFile(name) {
+  return WIKILINK_FILE_EXTENSIONS.some(ext => name.endsWith(ext));
+}
+
+function wikilinkFileStem(name) {
+  const dot = name.lastIndexOf('.');
+  return dot === -1 ? name : name.slice(0, dot);
+}
+
+function wikilinkTreeSignature(vaultPath) {
+  const parts = [path.resolve(vaultPath)];
+
+  function scan(dir, rel) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        try {
+          const stat = fs.statSync(full);
+          parts.push(`${relPath}/:${stat.mtimeMs}`);
+        } catch {
+          parts.push(`${relPath}/`);
+        }
+        scan(full, relPath);
+      } else if (isWikilinkIndexFile(entry.name)) {
+        parts.push(relPath);
+      }
+    }
+  }
+
+  for (const d of WIKILINK_SCAN_DIRS) scan(path.join(vaultPath, d), d);
+
+  let rootEntries;
+  try { rootEntries = fs.readdirSync(vaultPath, { withFileTypes: true }); } catch { return parts.join('|'); }
+  for (const entry of rootEntries) {
+    if (entry.name.startsWith('.') || entry.isDirectory() || !isWikilinkIndexFile(entry.name)) continue;
+    parts.push(entry.name);
+  }
+
+  return parts.join('|');
+}
+
 function wikilinkIndex() {
-  if (_wikilinkCache) return _wikilinkCache;
   const { vaultPath } = readConfig();
   if (!vaultPath) return {};
+  const resolvedVaultPath = path.resolve(vaultPath);
+  const signature = wikilinkTreeSignature(resolvedVaultPath);
+  if (_wikilinkCache?.vaultPath === resolvedVaultPath && _wikilinkCache.signature === signature) {
+    return _wikilinkCache.index;
+  }
+
   const idx = {};
-  const SCAN = ['projects', 'todos', 'notizen', 'wiki', 'entities', 'raw'];
 
   function scan(dir, rel) {
     if (!fs.existsSync(dir)) return;
@@ -816,20 +922,24 @@ function wikilinkIndex() {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         scan(full, relPath);
-      } else if (entry.name.endsWith('.md') || entry.name.endsWith('.base')) {
-        const dot  = entry.name.lastIndexOf('.');
-        const stem = entry.name.slice(0, dot);
+      } else if (isWikilinkIndexFile(entry.name)) {
+        const stem = wikilinkFileStem(entry.name);
         idx[stem] = relPath;
         idx[relPath.slice(0, relPath.lastIndexOf('.'))] = relPath;
       }
     }
   }
 
-  for (const d of SCAN) scan(path.join(vaultPath, d), d);
-  for (const f of fs.readdirSync(vaultPath)) {
-    if (f.endsWith('.md') && !f.startsWith('.')) idx[f.slice(0, -3)] = f;
+  for (const d of WIKILINK_SCAN_DIRS) scan(path.join(resolvedVaultPath, d), d);
+  let rootEntries;
+  try { rootEntries = fs.readdirSync(resolvedVaultPath, { withFileTypes: true }); } catch { rootEntries = []; }
+  for (const entry of rootEntries) {
+    const f = entry.name;
+    if (!entry.isDirectory() && isWikilinkIndexFile(f) && !f.startsWith('.')) {
+      idx[wikilinkFileStem(f)] = f;
+    }
   }
-  _wikilinkCache = idx;
+  _wikilinkCache = { vaultPath: resolvedVaultPath, signature, index: idx };
   return idx;
 }
 
@@ -917,9 +1027,9 @@ app.get('/api/list', (req, res) => {
       const fp = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         result.push({ type: 'dir', name: entry.name, path: relPath, children: scan(fp, relPath) });
-      } else if (entry.name.endsWith('.md') || entry.name.endsWith('.pdf')) {
+      } else if (entry.name.endsWith('.md') || entry.name.endsWith('.pdf') || entry.name.endsWith('.base')) {
         let fm = {};
-        if (entry.name.endsWith('.md')) {
+        if (entry.name.endsWith('.md') || entry.name.endsWith('.base')) {
           try { fm = matter(fs.readFileSync(fp, 'utf-8')).data; } catch {}
         }
         result.push({ type: 'file', name: entry.name, path: relPath, frontmatter: fm });
@@ -1152,8 +1262,270 @@ app.post('/api/config/file', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+app.get('/api/scheduler/presets', (_req, res) => res.json(PRESETS));
+
+app.get('/api/scheduler/jobs', (_req, res) => {
+  const jobs = db.prepare('SELECT * FROM scheduler_jobs ORDER BY created_at DESC').all();
+  const active = new Set(getActiveJobIds());
+  res.json(jobs.map(j => ({ ...j, running: active.has(j.id) })));
+});
+
+app.post('/api/scheduler/jobs', (req, res) => {
+  const { name, cron: cronExpr, agent_id, prompt, enabled = 1 } = req.body;
+  if (!name?.trim() || !cronExpr?.trim() || !agent_id || !prompt?.trim())
+    return res.status(400).json({ error: 'name, cron, agent_id und prompt sind Pflichtfelder' });
+  const { validate } = require('node-cron');
+  if (!validate(cronExpr)) return res.status(400).json({ error: `Ungültiger Cron-Ausdruck: "${cronExpr}"` });
+  const id = `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  db.prepare(
+    `INSERT INTO scheduler_jobs (id, name, cron, agent_id, prompt, enabled) VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(id, name.trim(), cronExpr.trim(), agent_id, prompt.trim(), enabled ? 1 : 0);
+  reloadJob(id);
+  res.json(db.prepare('SELECT * FROM scheduler_jobs WHERE id=?').get(id));
+});
+
+app.patch('/api/scheduler/jobs/:id', (req, res) => {
+  const job = db.prepare('SELECT * FROM scheduler_jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job nicht gefunden' });
+  const { name, cron: cronExpr, agent_id, prompt, enabled } = req.body;
+  if (cronExpr !== undefined) {
+    const { validate } = require('node-cron');
+    if (!validate(cronExpr)) return res.status(400).json({ error: `Ungültiger Cron-Ausdruck: "${cronExpr}"` });
+  }
+  db.prepare(`
+    UPDATE scheduler_jobs SET
+      name    = COALESCE(?, name),
+      cron    = COALESCE(?, cron),
+      agent_id= COALESCE(?, agent_id),
+      prompt  = COALESCE(?, prompt),
+      enabled = COALESCE(?, enabled)
+    WHERE id=?
+  `).run(name ?? null, cronExpr ?? null, agent_id ?? null, prompt ?? null,
+         enabled !== undefined ? (enabled ? 1 : 0) : null, req.params.id);
+  reloadJob(req.params.id);
+  res.json(db.prepare('SELECT * FROM scheduler_jobs WHERE id=?').get(req.params.id));
+});
+
+app.delete('/api/scheduler/jobs/:id', (req, res) => {
+  const info = db.prepare('DELETE FROM scheduler_jobs WHERE id=?').run(req.params.id);
+  if (info.changes === 0) return res.status(404).json({ error: 'Job nicht gefunden' });
+  unscheduleJob(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/scheduler/jobs/:id/run', (req, res) => {
+  const job = db.prepare('SELECT * FROM scheduler_jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job nicht gefunden' });
+  runJobById(req.params.id);
+  res.json({ ok: true });
+});
+
+// ── Mission Control ────────────────────────────────────────────────────────────
+const missionInsert = db.prepare(`
+  INSERT INTO mission_tasks (id, title, description, status, agent_id, priority, created_at)
+  VALUES (?, ?, ?, 'queued', ?, ?, datetime('now'))
+`);
+const missionUpdate = db.prepare(`
+  UPDATE mission_tasks SET status=?, agent_id=COALESCE(?,agent_id),
+    started_at=CASE WHEN ? = 'running' THEN datetime('now') ELSE started_at END,
+    completed_at=CASE WHEN ? IN ('done','error') THEN datetime('now') ELSE completed_at END,
+    task_run_id=COALESCE(?,task_run_id)
+  WHERE id=?
+`);
+
+app.get('/api/mission/tasks', (req, res) => {
+  const { status } = req.query;
+  const rows = status
+    ? db.prepare('SELECT * FROM mission_tasks WHERE status=? ORDER BY created_at DESC').all(status)
+    : db.prepare('SELECT * FROM mission_tasks ORDER BY created_at DESC').all();
+  res.json(rows);
+});
+
+app.post('/api/mission/tasks', (req, res) => {
+  const { title, description = '', agent_id = null, priority = 'medium' } = req.body;
+  if (!title?.trim()) return res.status(400).json({ error: 'Titel fehlt' });
+  const id = `mt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  missionInsert.run(id, title.trim(), description.trim(), agent_id, priority);
+  res.json(db.prepare('SELECT * FROM mission_tasks WHERE id=?').get(id));
+});
+
+app.patch('/api/mission/tasks/:id', (req, res) => {
+  const task = db.prepare('SELECT * FROM mission_tasks WHERE id=?').get(req.params.id);
+  if (!task) return res.status(404).json({ error: 'Task nicht gefunden' });
+  const { status, agent_id, task_run_id } = req.body;
+  const newStatus = status || task.status;
+  missionUpdate.run(newStatus, agent_id || null, newStatus, newStatus, task_run_id || null, req.params.id);
+  res.json(db.prepare('SELECT * FROM mission_tasks WHERE id=?').get(req.params.id));
+});
+
+app.delete('/api/mission/tasks/:id', (req, res) => {
+  const info = db.prepare('DELETE FROM mission_tasks WHERE id=?').run(req.params.id);
+  if (info.changes === 0) return res.status(404).json({ error: 'Task nicht gefunden' });
+  res.json({ ok: true });
+});
+
+app.post('/api/mission/tasks/:id/run', (req, res) => {
+  const task = db.prepare('SELECT * FROM mission_tasks WHERE id=?').get(req.params.id);
+  if (!task) return res.status(404).json({ error: 'Task nicht gefunden' });
+  const { agents = [] } = readConfig();
+  const agentId = req.body.agent_id || task.agent_id;
+  const agent = agents.find(a => a.id === agentId);
+  if (!agent) return res.status(400).json({ error: 'Kein Agent zugewiesen' });
+
+  const prompt = task.description
+    ? `${task.title}\n\n${task.description}`
+    : task.title;
+  const taskId = `${agent.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const cmdArgs = [...(agent.args || []), prompt];
+
+  let proc;
+  try {
+    proc = spawn(agent.command, cmdArgs, {
+      cwd: agent.workDir || ROOT,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    return res.status(500).json({ error: `Spawn fehlgeschlagen: ${err.message}` });
+  }
+
+  const entry = {
+    id: taskId, agentId: agent.id, agentName: agent.name, agentColor: agent.color,
+    prompt, status: 'running',
+    startedAt: new Date().toISOString(), completedAt: null, exitCode: null,
+  };
+  taskHistory.unshift(entry);
+  missionUpdate.run('running', agent.id, 'running', 'running', taskId, task.id);
+
+  const state = { proc, lines: [], done: false, sseClients: new Set(), entry };
+  taskMap.set(taskId, state);
+
+  const emit = (text, type) => {
+    const line = { text, type, ts: Date.now() };
+    state.lines.push(line);
+    const msg = `data: ${JSON.stringify({ ...line, done: false })}\n\n`;
+    for (const c of state.sseClients) c.write(msg);
+  };
+
+  proc.stdout.on('data', d => emit(d.toString(), 'stdout'));
+  proc.stderr.on('data', d => emit(d.toString(), 'stderr'));
+
+  proc.on('error', err => {
+    emit(`\nFehler: ${err.message}\n`, 'stderr');
+    state.done = true;
+    entry.status = 'error';
+    entry.completedAt = new Date().toISOString();
+    saveTasks();
+    missionUpdate.run('error', null, 'error', 'error', null, task.id);
+    for (const c of state.sseClients) {
+      c.write(`data: ${JSON.stringify({ type: 'done', done: true })}\n\n`);
+      c.end();
+    }
+    state.sseClients.clear();
+  });
+
+  proc.on('close', code => {
+    emit(`\n[Prozess beendet · Code ${code}]\n`, 'system');
+    state.done = true;
+    entry.status = code === 0 ? 'done' : 'error';
+    entry.exitCode = code;
+    entry.completedAt = new Date().toISOString();
+    entry.lines = state.lines.slice(0, 500);
+    saveTasks();
+    const finalStatus = code === 0 ? 'done' : 'error';
+    missionUpdate.run(finalStatus, null, finalStatus, finalStatus, null, task.id);
+    for (const c of state.sseClients) {
+      c.write(`data: ${JSON.stringify({ type: 'done', done: true })}\n\n`);
+      c.end();
+    }
+    state.sseClients.clear();
+  });
+
+  res.json({ taskId, missionTaskId: task.id });
+});
+
+app.post('/api/mission/tasks/:id/assign', async (req, res) => {
+  const task = db.prepare('SELECT * FROM mission_tasks WHERE id=?').get(req.params.id);
+  if (!task) return res.status(404).json({ error: 'Task nicht gefunden' });
+  const { agents = [] } = readConfig();
+  if (!agents.length) return res.status(400).json({ error: 'Keine Agenten konfiguriert' });
+
+  const agentDescriptions = agents.map(a =>
+    `- id: "${a.id}", name: "${a.name}", description: "${a.description || ''}"`
+  ).join('\n');
+  const classifyPrompt = `Du bist ein Task-Routing-System. Wähle den am besten geeigneten Agenten für diese Aufgabe.
+
+Aufgabe: "${task.title}"
+${task.description ? `Beschreibung: "${task.description}"` : ''}
+
+Verfügbare Agenten:
+${agentDescriptions}
+
+Antworte NUR mit der agent-id als JSON: {"agent_id": "..."} — keine weiteren Erklärungen.`;
+
+  try {
+    const { spawn: spawnAssign } = require('child_process');
+    const haiku = agents.find(a => a.command === 'claude') || agents[0];
+    if (!haiku) return res.status(400).json({ error: 'Kein Claude-Agent gefunden' });
+
+    const baseArgs = (haiku.args || []).filter((a, i, arr) =>
+      a !== '--model' && arr[i - 1] !== '--model');
+    const haikuArgs = [...baseArgs, '--model', 'claude-haiku-4-5-20251001'];
+    const proc = spawnAssign(haiku.command, [...haikuArgs, classifyPrompt], {
+      cwd: haiku.workDir || ROOT,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let assignSettled = false;
+    const sendAssign = (data) => { if (!assignSettled) { assignSettled = true; res.json(data); } };
+    proc.stdout.on('data', d => { out += d.toString(); });
+    proc.on('close', () => {
+      try {
+        const match = out.match(/\{[^}]*"agent_id"\s*:\s*"([^"]+)"[^}]*\}/);
+        const agentId = match ? match[1] : agents[0].id;
+        const validAgent = agents.find(a => a.id === agentId) || agents[0];
+        db.prepare('UPDATE mission_tasks SET agent_id=? WHERE id=?').run(validAgent.id, task.id);
+        sendAssign({ agent_id: validAgent.id, agent_name: validAgent.name });
+      } catch {
+        db.prepare('UPDATE mission_tasks SET agent_id=? WHERE id=?').run(agents[0].id, task.id);
+        sendAssign({ agent_id: agents[0].id, agent_name: agents[0].name });
+      }
+    });
+    proc.on('error', () => {
+      db.prepare('UPDATE mission_tasks SET agent_id=? WHERE id=?').run(agents[0].id, task.id);
+      sendAssign({ agent_id: agents[0].id, agent_name: agents[0].name });
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Telegram: message history ────────────────────────────────────────────────
+app.get('/api/telegram/messages', (req, res) => {
+  const limit   = Math.min(parseInt(req.query.limit || '100', 10), 500);
+  const agentId = req.query.agent_id || null;
+  const rows = agentId
+    ? db.prepare('SELECT * FROM messages WHERE agent_id = ? OR agent_id IS NULL ORDER BY id DESC LIMIT ?').all(agentId, limit)
+    : db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit);
+  res.json(rows.reverse());
+});
+
+app.get('/api/telegram/status', (_req, res) => {
+  const total = db.prepare('SELECT COUNT(*) as c FROM messages').get().c;
+  const last  = db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT 1').get();
+  res.json({
+    activeBots: getActiveBots(),
+    total_messages: total,
+    last_message: last || null,
+  });
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 const { port = 4000 } = readConfig();
-app.listen(port, () => {
+app.listen(port, '127.0.0.1', () => {
   console.log(`\n⚡ AgenticOS → http://localhost:${port}\n`);
+  setupTelegram(db, readConfig().agents || []);
+  setupScheduler(db, readConfig);
 });
